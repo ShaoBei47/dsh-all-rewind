@@ -59,8 +59,7 @@
     "url": "https://github.com/ShaoBei47/dsh-all-rewind/issues"
   },
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.4",
