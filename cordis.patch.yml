@@ -1,0 +1,42 @@
+# ============================================================================
+# dsh-all-rewind —— DSH bundle patch
+# ============================================================================
+# 把一个 host 插件插入 desktop/web profile 的配置树。
+#   - 宿主半区：lib/index.js —— 每会话隐藏 git 快照仓库、轮次钩子、工具与 HTTP API
+#   - 客户端半区：assets/ui.js —— 经 webServer 的 index 注入，右下角/左下角回滚面板
+#
+# 本地开发安装：
+#   dsh plugin --profile desktop add link:<本目录绝对路径>
+# 或使用本包的 install.mjs（会复制到 profile node_modules 并写入 cordis.patch.yml）。
+# ============================================================================
+
+- insert:
+    - id: dsh-all-rewind
+      name: dsh-all-rewind
+      config:
+        # 自定义快照存储位置（默认 $DSH_HOME/dsh-all-rewind；支持绝对路径、~/、相对 DSH_HOME）
+        # dataDir: D:/dsh-rewind-snapshots
+        keepTurns: 20
+        autoMaintenance:
+          enabled: true
+          thresholdBytes: 134217728
+          checkEveryTurns: 3
+        captureSkipTools:
+          - read
+          - grep
+          - glob
+          - web_search
+          - web_fetch
+          - read_image
+          - todo_write
+          - get_goal
+          - list_agents
+          - job_list
+          - job_output
+          - ask_user_question
+          - present
+          - skill
+          - wait_agent
+          - ops_inspect_local_file
+          - ops_grep
+          - ops_glob

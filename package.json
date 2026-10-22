@@ -1,0 +1,77 @@
+{
+  "name": "dsh-all-rewind",
+  "version": "0.4.0",
+  "description": "Conversation-turn rewind for DeepSeek Harness: per-session hidden snapshot repository (before-chat-turn / toolcall anchors), content-addressed directory trees, rewind buttons under each user prompt, configurable snapshot storage and automatic maintenance.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "rewind",
+    "rollback",
+    "snapshot",
+    "checkpoint",
+    "ai-ide"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "icon": "./icon.png",
+  "exports": {
+    ".": "./lib/index.js",
+    "./store": "./lib/store.js",
+    "./manager": "./lib/manager.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "assets",
+    "cordis.patch.yml",
+    "dsh-plugin.json",
+    "install.mjs",
+    "icon.png",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "README.zh-CN.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node --test test/",
+    "test:all": "node test/run-all.mjs",
+    "smoke": "node test/smoke.mjs",
+    "install:profile": "node install.mjs",
+    "prepublishOnly": "node test/run-all.mjs && node test/smoke.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "author": "ShaoBei47",
+  "homepage": "https://github.com/ShaoBei47/dsh-all-rewind#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ShaoBei47/dsh-all-rewind.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ShaoBei47/dsh-all-rewind/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/dsh": "^0.2.0-rc.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh": {
+      "optional": true
+    }
+  }
+}

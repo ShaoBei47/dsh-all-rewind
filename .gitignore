@@ -1,0 +1,26 @@
+# dependencies / tooling
+node_modules/
+.pnpm-store/
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# local scratch & builds
+.tmp/
+dist/
+build/
+out/
+coverage/
+*.log
+npm-debug.log*
+
+# editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# local plugin data (snapshots must never be committed)
+snapshots/
+trae-rewind/
+*.tgz
