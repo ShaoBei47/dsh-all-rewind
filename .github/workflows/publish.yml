@@ -29,8 +29,10 @@ jobs:
             echo "package.json version ($PKG_VERSION) != tag ($TAG_VERSION)" >&2
             exit 1
           fi
+      - name: Verify git is available
+        run: git --version
       - name: Test suite
-        run: node --test test/
+        run: node --test "test/*.test.js"
       - name: Smoke test
         run: node test/smoke.mjs
       - name: Publish

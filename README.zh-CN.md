@@ -1,148 +1,117 @@
 # dsh-all-rewind
 
 [![CI](https://github.com/ShaoBei47/dsh-all-rewind/actions/workflows/ci.yml/badge.svg)](https://github.com/ShaoBei47/dsh-all-rewind/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/dsh-all-rewind.svg)](https://www.npmjs.com/package/dsh-all-rewind)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/DSH-desktop%20%26%20web-4d7cfe)](https://harness.deepseek.com)
 
-**[English](README.md)** · 中文说明
+中文 · **[English](README.md)**
 
-给 [DeepSeek Harness](https://harness.deepseek.com)（DSH）用的**对话轮次回退**插件：
-每轮对话开始前给工作区打快照，AI 每次改文件后再提交一次，**在你发出的提示词下方点一下**，就能把工作区还原到那一轮之前的状态。
+给 [DeepSeek Harness](https://harness.deepseek.com)（DSH）用的 TRAE 风格**回退（Rewind）**插件。
 
-```text
-┌─────────────────────────────────────────────────────────────┐
-│  你：把登录页按钮改成蓝色，顺便删掉旧的 API 代码                 │
-└─────────────────────────────────────────────────────────────┘
-                    ↩ 回退到第 12 轮对话之前
-```
+每一轮对话开始、AI 动手之前，插件会把整个工作区快照进一个**影子 git 仓库**；
+你的每条提示词下面会出现一个小按钮 `↩ 回退到第 N 轮对话之前`。点一下并确认，
+**工作区文件**和**对话**会一起回退到那一轮之前 —— 你点的那一轮以及它之后的内容都不再显示。
 
-- **位置符合直觉**：回退入口就在**你自己的提示词**下方（和 TRAE 一样）。
-- **可逆**：每次回退前自动留安全快照，误回退还能再退回来。
-- **磁盘有界**：未变文件跨版本共享、旧轮次自动修剪、超阈值自动 GC。
-- **存储可放别的盘**：改一个 `dataDir` 配置就行。
-
----
-
-## 目录
-
-- [效果预览](#效果预览)
-- [功能特性](#功能特性)
-- [环境要求](#环境要求)
-- [安装](#安装)
-  - [最快安装（GitHub）](#最快安装github)
-  - [从 npm 安装](#从-npm-安装)
-  - [手动安装（npm 包 → profile）](#手动安装npm-包--profile)
-  - [从源码安装](#从源码安装)
-  - [验证安装](#验证安装)
-  - [升级 / 卸载](#升级--卸载)
-- [快速上手](#快速上手)
-- [使用](#使用)
-- [配置](#配置)
-- [快照存在哪](#快照存在哪)
-- [工作原理](#工作原理)
-- [磁盘占用](#磁盘占用)
-- [已知限制](#已知限制)
-- [常见问题](#常见问题)
-- [参与贡献](#参与贡献)
-- [License](#license)
-
----
-
-## 效果预览
-
-安装并重启 DSH 之后，你发出的每条提示词下面都会多出一行小字：
+影子仓库放在工作区之外（默认 `~/.dsh/dsh-all-rewind`，可配置），一轮一个 commit：
+没变的文件只存一份，后续版本在 `git gc` 时做增量压缩。**你自己的 git 仓库完全不会被改动**
+（index、objects、refs、工作树都保持原样）。
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
-│  你：把登录页按钮改成蓝色，顺便删掉旧的 API 代码                 │
+│  你：把登录按钮改成蓝色，并移除旧的 API 调用                 │
 └─────────────────────────────────────────────────────────────┘
-                    ↩ 回退到第 12 轮对话之前
+                        ↩ 回退到第 12 轮对话之前
 ```
-
-鼠标悬停可看：这一轮改了几个文件、消息预览、快照存储位置与占用。
-点击 → 二次确认 → AI 在这一轮的文件改动静默撤销，底部浮层显示还原/删除/跳过文件数以及安全快照版本。
 
 ---
 
-## 功能特性
+## 特性
 
-| | |
+- **对话与文件一起回退（就地）**：文件恢复到该轮开始前的状态，对话在**同一个会话内**被截断——
+  被回退的这轮及之后的消息从聊天和模型历史中消失，不会新开对话、不分叉。截断复用 DSH 自带的
+  压缩（compaction）机制：追加一条空的 `system/message` surface replace；被回退的提示词会回填到
+  输入框，可直接修改重发。
+- **占用小**：每个工作区一个真正的 git 对象库，一轮一个 commit；只写入变化的内容，
+  相似版本由 `git gc` 做 delta 压缩。
+- **不碰你的仓库**：影子的 `GIT_DIR` 在插件数据目录里，工作区只是 `--work-tree`。
+- **遵守忽略规则**：工作区 `.gitignore` 以及默认的 `node_modules/`、`dist/`、`build/`、`.venv/`
+  等重目录不会被快照。
+- **回退可撤销**：恢复文件前会先把当前状态做成安全快照，退过头也能找回来。
+- **容量可控**：每个会话只列出最近 `keepTurns` 个回退点；仓库超过阈值后自动 `git gc`。
+- **工作区不是 git 仓库也能用**：影子仓库由插件自己创建。
+- **同一工作区共用一个仓库**：多个会话切换不会重复占空间。
+
+---
+
+## 环境要求与权限
+
+### 必须的依赖
+
+| 要求 | 说明 |
 | --- | --- |
-| **轮次快照** | `turn/start` 时写入 `before-chat-turn-<n>`，此时模型还没动任何文件。 |
-| **工具级提交** | 每次会改文件的工具结果写入 `toolcall-<n>-<callId>`，历史可审计。 |
-| **文件级还原** | 还原被改文件、删除该轮新建文件、**永不删除任何快照都没见过的文件**。 |
-| **安全** | 回退前留安全快照、检测手动改动冲突、扫描被截断时拒绝回滚。 |
-| **省磁盘** | 内容寻址目录树，未改动的文件/目录跨版本共享。 |
-| **自动维护** | `keepTurns` 窗口修剪 + 超过体积阈值自动 GC。 |
-| **存储可配** | `dataDir` / `DSH_ALL_REWIND_DIR`，支持绝对路径、`~/…`、相对 `$DSH_HOME`。 |
-| **可脚本化** | Agent 工具 `rewind_status` / `rewind_list` / `rewind_restore` / `rewind_prune`，以及仅本机可访问的 HTTP API。 |
+| DSH 桌面版（或 `dsh web`） | 在 DSH 0.2.0-rc.2 上验证。回退按钮注入在聊天界面里；宿主需要暴露 `sessions`、`sessionQuery`、`sandboxPolicy` 服务以及 `agent/request` 事件（所有交互式 web/桌面组合都有）。 |
+| **DSH 进程能找到 Git 2.13+** | 插件会执行 `git add` / `git write-tree` / `git read-tree`（以及维护用的 `git gc`）。普通安装的 Git 即可，不需要 git 账号、不需要联网。Windows 上先装 [Git for Windows](https://git-scm.com/downloads) 再**重启 DSH**，让进程重新读取 PATH。 |
+| Node.js 22+ | 仅源码手动安装和跑测试时需要；已打包的插件本身不额外依赖 Node。 |
+| 可写的数据目录 | 默认 `$DSH_HOME/dsh-all-rewind`（`C:\Users\<你>\.dsh\dsh-all-rewind`），可用 `dataDir` 改到别的盘；必须是你的用户可写的目录，不需要管理员权限。 |
+| 工作区写权限 | 回退会往工作区写文件，因此当前工作区不能是只读的。 |
 
----
+如果 `git` 不在 PATH 里，在配置里写完整路径（绝对路径、用正斜杠）：
 
-## 环境要求
+```yaml
+- id: dsh-all-rewind
+  config:
+    gitExecutable: "C:/Program Files/Git/cmd/git.exe"
+```
 
-- 支持插件机制的 DeepSeek Harness（桌面端或 web profile）。
-- **只有手动/源码安装需要 Node.js 22+**；走 DSH 插件管理器安装不需要本机 Node。
-- 无运行时 npm 依赖，Windows / macOS / Linux 均可。
+`rewind_status`（或按钮悬停提示）会报告插件实际找到的 git 版本；低于 2.13 通常也能跑，但不受支持。
+
+### DSH 权限设置
+
+插件运行在 DSH 的 **host 进程**里（不是 Agent 沙箱内），所以它自己写文件不需要逐次工具审批。真正需要注意的是两个宿主侧设置：
+
+| 设置 | 要求值 | 原因 |
+| --- | --- | --- |
+| **会话权限预设** | 允许**写工作区**（如默认 / `workspace-write`）。**只读（read-only）会话会被拒绝**并返回 `READ_ONLY_SESSION`。 | 恢复轮次时用 `git read-tree` 重写工作区文件。 |
+| **工作区位置** | 普通本地目录，且你的用户可读写。UNC 路径、网络共享、其他账号拥有的目录只有在 git 和你的用户都能访问时才可用。 | 影子 git 仓库把这个目录当作 work tree。 |
+
+不需要 DSH 全局权限、开发者模式、管理员权限或网络访问。插件的本地 HTTP API 只通过 DSH 自带的环回 web 服务器暴露（强制 loopback Host 与同源请求）。
+
+另外：插件会**屏蔽宿主机的全局/system git 配置**（设置 `GIT_CONFIG_NOSYSTEM`、空的 `GIT_CONFIG_GLOBAL`）并中和 LFS 等 filter，所以快照按字节存储，不受你本机 git 配置影响，也不需要配置签名。
+
+### 插件读写了什么
+
+- **读取**：工作区文件（遵守 `.gitignore` 和排除列表）、当前会话的事件流（用用户提示词生成回退点标签）。
+- **写入**：`dataDir` 下的影子 git 仓库；回退时的工作区文件；应用对话截断时向当前会话日志追加一条空的 `system/message`；Web 客户端 `localStorage` 里的一个折叠标记。
+- **绝不触碰**：你自己的 `.git` 目录/index/refs、工作区以外的文件、其他会话的日志、网络。
 
 ---
 
 ## 安装
 
-> 无论用哪种方式，装完都要**重启 DeepSeek Harness**：桌面端在启动时加载插件并注入客户端 UI。
-
-### 最快安装（GitHub）
-
-现在就能用，不依赖 npm 发布：
+### 方式一：插件管理器 / npm（推荐）
 
 ```bash
-dsh plugin --profile web add github:ShaoBei47/dsh-all-rewind
+dsh plugin --profile desktop add dsh-all-rewind
 ```
 
-**桌面端**：在 DSH 会话里让 Agent 安装 `dsh-all-rewind`（它会走插件管理器的 `install_bundle`），
-或使用插件管理界面。**不要**在终端对桌面 profile 执行 `dsh plugin --profile desktop …`——桌面 profile 由应用托管。
+然后重启 DeepSeek Harness。桌面版的插件管理器页面也可以直接从 npm 安装。
 
-### 从 npm 安装
-
-npm 包发布后可用：
-
-```bash
-dsh plugin --profile web add dsh-all-rewind
-```
-
-桌面端同样通过 DSH Agent / 插件界面安装，而不是终端。
-
-### 手动安装（npm 包 → profile）
-
-不想用插件管理器时，可以下载 npm 包，再用仓库里的安装脚本复制进 profile：
-
-```bash
-# 1) 把 npm 包下载到临时目录
-npm install --prefix "%TEMP%\dsh-rewind-pkg" dsh-all-rewind
-
-# 2) 复制进 desktop profile 并写入 cordis.patch.yml
-#    在本仓库目录里执行（需要 Node 22+）
-node install.mjs --source "%TEMP%\dsh-rewind-pkg\node_modules\dsh-all-rewind"
-```
-
-### 从源码安装
+### 方式二：本仓库
 
 ```bash
 git clone https://github.com/ShaoBei47/dsh-all-rewind.git
 cd dsh-all-rewind
-
-node install.mjs                                        # 装进 desktop profile
-node install.mjs --profile web                          # 装进其它 profile
-node install.mjs --data-dir E:/dsh-rewind-snapshots     # 快照放到另一个盘
-node install.mjs --dry-run                              # 只预览要改什么
+node install.mjs                                # 复制进 desktop profile 并写入 cordis.patch.yml
+node install.mjs --data-dir D:/my-rewind-repo   # 可选：自定义存储位置
 ```
 
-`install.mjs` 会把运行时文件复制到 `<DSH_HOME>/profiles/<profile>/node_modules/dsh-all-rewind`，
-并向 `<DSH_HOME>/profiles/<profile>/cordis.patch.yml` 追加一个受管理的配置块（自动生成时间戳备份）。
-它**不会碰你的快照数据**，并且会自动清理旧的 `dsh-trae-rewind` 条目。
+安装脚本会替换自己写入的配置块（不会重复添加），并清理 0.3.x 及更早版本留下的
+`dsh-trae-rewind` 条目。
 
-**手动等价做法：** 把本目录复制到 `<DSH_HOME>/profiles/desktop/node_modules/dsh-all-rewind`，
-然后在 `<DSH_HOME>/profiles/desktop/cordis.patch.yml` 末尾追加：
+### 方式三：手动安装
+
+把本包复制到 `<DSH_HOME>/profiles/<profile>/node_modules/dsh-all-rewind`，并在该 profile 的
+`cordis.patch.yml` 里追加：
 
 ```yaml
 - insert:
@@ -152,262 +121,187 @@ node install.mjs --dry-run                              # 只预览要改什么
         keepTurns: 20
 ```
 
+之后重启 DeepSeek Harness。
+
 ### 验证安装
 
-- 你的提示词下方出现回退小字；
-- 宿主日志出现 `dsh-all-rewind ready (dataDir=…)`；
-- 让 Agent 调 `rewind_status`，或访问：
-
-  ```bash
-  curl http://127.0.0.1:19387/dsh-all-rewind/api/status
-  ```
+- 把鼠标悬停在聊天里的回退按钮上：提示里会显示存储目录和 git 版本。
+- 或让 Agent 调用 `rewind_status`，正常结果里应有 `"backend": "shadow-git"` 和
+  `"git": { "available": true, ... }`。
 
 ### 升级 / 卸载
 
 ```bash
-# 从更新的代码重新安装 / 升级
-node install.mjs
-
-# 卸载：移除 profile 里的注册条目和副本（快照数据保留）
-node install.mjs --uninstall
+node install.mjs               # 更新 checkout 后重新执行
+node install.mjs --uninstall   # 移除 profile 条目和复制过去的包
 ```
 
-卸载后同样需要重启 DeepSeek Harness。
+`dataDir` 下的快照数据不会被删除；不需要时自行删除即可。
 
 ---
 
-## 快速上手
+## 快速开始
 
-1. **安装并重启**（见上）；
-2. 发一条会让 AI 改文件的提示词；
-3. 几秒内这条提示词下方会出现 `↩ 回退到第 N 轮对话之前`；
-4. 悬停确认 → 点击 → 二次确认，即可回退。
+1. 打开一个工作区，发一条提示词，等这一轮结束。
+2. 你的提示词下方会出现 `↩ 回退到第 N 轮对话之前`。
+3. 点击并确认：
+   - 工作区文件恢复到这一轮开始前；
+   - 聊天从这条提示词开始折叠，提示词被回填到输入框；模型历史会在你发送下一条消息时被正式截断。
+4. 在回退后的位置修改并重新发送；你离开时的文件状态作为安全快照留在影子仓库里。
 
-已经打开的编辑器标签需要重新打开才能看到还原后的内容。
-
----
-
-## 使用
-
-### 在提示词下方回退
-
-- 只有**有快照的轮次**才会出现入口（插件运行期间捕获、且还在 `keepTurns` 窗口内）。
-- 点击 → 二次确认 → 工作区还原到**该轮对话发起前**。
-- 回退前先写 `pre-revert-<时间>` 安全快照，回退后再写 `post-revert-<时间>` 基线，所以回退本身可再次回退。
-- 文件处理规则：
-
-  | 情况 | 动作 |
-  | --- | --- |
-  | 该轮被修改过 | 从快照还原 |
-  | 该轮新建 | 删除 |
-  | AI 回合之外被手动改过 | 默认覆写（记为 conflict），或配 `onConflict: "skip"` 跳过 |
-  | 任何快照都没见过 | **不动** |
-
-### 让 Agent 帮你回退
-
-| 工具 | 作用 |
-| --- | --- |
-| `rewind_status` | 快照仓库 / 回滚点 / 存储位置与占用概览 |
-| `rewind_list` | 当前会话的回滚点（`all: true` 看全部会话） |
-| `rewind_restore` | 执行回滚：`{ target, dryRun?, onConflict?, force? }` |
-| `rewind_prune` | 修剪 `keepTurns` 窗口之外的版本 |
-
-可以直接说：
-
-- “列出我的回滚点”
-- “回退到第 3 轮之前”
-- “先看看回退到第 2 轮会影响哪些文件，不要真的改”（用 `dryRun: true`）
-
-`target` 支持版本号（推荐）、commit/tree 前缀或标签（如 `before-chat-turn-3`）。
-
-### HTTP API
-
-界面用的就是这套仅本机 API，也方便脚本调用。端点只接受回环地址、拒绝跨站请求，POST 需要
-`Content-Type: application/json`。
-
-```
-GET  /dsh-all-rewind/api/status            # storage.dataDir、diskBytes、会话/回滚点数量
-GET  /dsh-all-rewind/api/sessions
-GET  /dsh-all-rewind/api/points?sessionId=<id>
-POST /dsh-all-rewind/api/revert            {sessionId, target, dryRun?, onConflict?, force?}
-POST /dsh-all-rewind/api/prune             {sessionId?}
-POST /dsh-all-rewind/api/maintenance       {sessionId?, keepVersions?}
-GET  /dsh-all-rewind/ui.js
-```
-
-```bash
-curl -X POST http://127.0.0.1:19387/dsh-all-rewind/api/revert \
-  -H "Content-Type: application/json" \
-  -d '{"sessionId":"session-abc","target":12,"dryRun":true}'
-```
-
----
-
-## 配置
-
-配置写在 profile 的 `cordis.patch.yml` 里（`install.mjs` 管理的那段插件条目）：
-
-```yaml
-- insert:
-    - id: dsh-all-rewind
-      name: dsh-all-rewind
-      config:
-        dataDir: "E:/dsh-rewind-snapshots"   # 可选，见「快照存在哪」
-        keepTurns: 20
-        autoMaintenance:
-          enabled: true
-          thresholdBytes: 134217728          # 128 MiB
-          checkEveryTurns: 3
-```
-
-| 配置 | 默认 | 说明 |
-| --- | --- | --- |
-| `dataDir` | `$DSH_HOME/dsh-all-rewind` | 快照根目录（绝对路径 / `~/…` / 相对 `$DSH_HOME`）。 |
-| `keepTurns` | `20` | 保留多少个轮次回滚点；窗口外的工具调用版本一并修剪。 |
-| `autoMaintenance.enabled` | `true` | 是否启用自动磁盘维护。 |
-| `autoMaintenance.thresholdBytes` | `134217728` | 单个仓库超过该大小触发 GC。 |
-| `autoMaintenance.checkEveryTurns` | `3` | 每多少轮检查一次（检查很便宜）。 |
-| `autoMaintenance.keepVersions` | `200` | 自动 GC 保留的版本数。 |
-| `maxFileBytes` | `1048576` | 超过该大小的文件不参与版本化。 |
-| `maxFiles` | `8000` | 扫描文件数上限；超出会标记截断并**拒绝回滚**（避免误删）。 |
-| `maxTotalBytes` | `268435456` | 扫描总字节上限。 |
-| `ignoreDirs` | `.git`、`node_modules`、`dist`、`.tmp` 等 | 追加忽略目录名。 |
-| `ignoreFiles` | `.DS_Store` 等 | 追加忽略文件名。 |
-| `captureSkipTools` | 只读工具（`read`、`grep`、`web_*` 等） | 不触发快照的工具。 |
-| `respectSandboxPolicy` | `true` | 只读会话拒绝回滚（`force: true` 可绕过）。 |
-| `onConflict` | `overwrite` | 快照后被手改的文件如何处理：`overwrite` 或 `skip`。 |
-| `http.enabled` | `true` | 是否注册本地 HTTP API / UI 资源路由。 |
-| `http.requireLocalOrigin` | `true` | 强制回环 Host、同源与 CSRF 校验。 |
-| `ui.enabled` | `true` | 是否注入客户端回退入口。 |
-
----
-
-## 快照存在哪
-
-解析优先级：
-
-1. `cordis.patch.yml` 里的 `config.dataDir`；
-2. 环境变量 `DSH_ALL_REWIND_DIR`（旧的 `DSH_TRAE_REWIND_DIR` 仍兼容）；
-3. 默认 `$DSH_HOME/dsh-all-rewind`（Windows 通常是 `C:\Users\<你>\.dsh\dsh-all-rewind`）。
-
-支持绝对路径、`~/…`、以及相对 `$DSH_HOME` 的路径。当前实际位置与占用可在按钮悬停提示、
-`rewind_status` 或 `GET /api/status`（`storage.dataDir` / `storage.diskBytes`）查看。
-
-修改 `dataDir` **不会自动迁移**已有快照，需要的话手动移动或删除旧目录。
-每个会话的目录结构（`<dataDir>/snapshots/<会话ID>/v2/`）：
-
-```text
-objects/<aa>/<rest>      内容寻址的文件 blob 与目录树节点（zlib 压缩，sha256 命名）
-base/content/<rel>       最新快照的工作区镜像
-disk/content/<rel>       已删除文件的墓碑副本
-version_file_<n>.json    每个版本一个很小的元数据文件：根 tree id、变更集、统计
-first_graph.json         仓库身份（会话 id + 工作区）
-latest_change.json       指向最新版本
-```
+> 回退到**第一轮**：文件恢复到对话开始前，并截断整段对话；重新发送提示词即可重新开始。
 
 ---
 
 ## 工作原理
 
-```text
-session/created   → baseline-<时间>                 首次观察工作区
-turn/start        → before-chat-turn-<轮次>         ← 「回退到第 N 轮之前」的目标点
-                    + 修剪 keepTurns 之外的版本
-                    + 必要时执行自动维护
-user/message      → 把该轮提示词预览挂到刚才的点上
-tool/call         → 记住 callId → 工具名
-tool/result       → toolcall-<轮次>-<callId>        （只读工具跳过）
-回退              → pre-revert-<时间> → 写回文件 → post-revert-<时间>
+1. **每轮一个锚点**：`turn/start` 时把工作区记录进影子仓库 —— `git add --all` 到私有 index、
+   `git write-tree`、`git commit-tree`、更新 `refs/heads/main`。`tools/pre-execute` 会拦住本轮
+   第一个工具调用，等这个 commit 完成，确保文件不可能在基线之前被修改。提交号和会话日志的
+   事件序号一起写进该工作区的 `state.json`。
+2. **文件：硬恢复**：回退时先把当前状态提交为安全快照，再执行
+   `git read-tree -u --reset <锚点>`（`--work-tree` 指向你的工作区）。锚点里有的文件被恢复，
+   锚点之后新建的文件被删除，被忽略的文件完全不碰；你自己的 `.git` 不会被读取或写入。
+3. **对话：就地 surface 截断**：DSH 只允许在打开的 turn/step 内追加 `system/message`，所以点击时
+   先记录一个**待执行的截断点**（目标轮的 `turn/start` 序号）。客户端立即把该提示词及之后的消息
+   折叠隐藏，并把原提示词回填到输入框。下一次模型请求时，插件的 `agent/request` 钩子追加一条空的
+   `system/message`，其 `surfaceOp.replace` 覆盖截断点及之后的全部 surface 节点 —— 与 DSH 官方
+   compaction 完全相同的机制 —— 聊天记录和模型历史同时失去这部分内容。
+4. **不分叉、不复制**：会话 id、标题、日志都保持不变；撤销所需的信息（文件安全快照）留在影子仓库里。
+
+### 存储结构
+
+```
+<dataDir>/
+  .git/empty-gitconfig            # 隔离宿主机全局 git 配置，避免影响快照
+  shadows/
+    <workspace-key>/
+      repo.git/                   # 私有 git 目录：objects / refs / index
+      state.json                  # 回退锚点（commit + 日志序号）和会话元数据
 ```
 
-每个会话一个隐藏仓库，保持 TRAE 的目录布局与锚点命名，但内部使用自带的**内容寻址存储**而不是
-调用 `git`：blob 用 zlib 压缩、按 sha256 命名；目录树是内容寻址的 JSON
-（`{"f":{文件→blob},"d":{目录→子树 id}}`），未变子树跨版本共享——和 git tree 的结构共享思路一致。
-好处是没装 git 的机器、以及禁止 spawn 子进程的受限宿主也能用。
+- `dataDir` 默认是 `$DSH_HOME/dsh-all-rewind`（Windows 下通常是
+  `C:\Users\<你>\.dsh\dsh-all-rewind`）。
+- `<workspace-key>` 由工作区绝对路径推导，所以同一目录下的所有会话共用一个仓库。
+- 可用 `config.dataDir`、环境变量 `DSH_ALL_REWIND_DIR` 或
+  `node install.mjs --data-dir <路径>` 改位置（`config.dataDir` 优先）。改位置**不会**搬移旧快照，
+  想保留历史请手动移动整个目录。
 
-还原时对比「目标版本的文件树 / 当前磁盘状态 / 最新快照」：
+### 磁盘占用
 
-| 情况 | 动作 |
-| --- | --- |
-| 目标里有、磁盘缺失 | 从 blob 还原 |
-| 目标里有、内容一致 | 跳过 |
-| 目标里有、内容不同 | 覆写（手改过会记为 `conflict`） |
-| 目标之后新建的 | 删除 |
-| 从未被快照见过 | **不动** |
-| 扫描被截断 | 拒绝回滚 |
+每轮一次 `git add` + 一个 commit：没变的内容指向同一个 object；仓库超过
+`autoMaintenance.thresholdBytes` 后自动 `git gc`，把相似版本打成增量。普通项目每轮只改几个文件，
+通常只占几 MB；由于排除了 `node_modules/`、`dist/` 等目录，第一个 commit 也很小。
 
 ---
 
-## 磁盘占用
+## 配置
 
-同一套合成负载实测（`v0.1` 每版内嵌全量清单 → 现在的共享树清单 + 窗口修剪）：
+以下字段全部可选，写在 profile `cordis.patch.yml` 的插件条目下：
 
-| 场景 | 工作区 | v0.1 快照目录 | **当前快照目录** |
-| --- | --- | --- | --- |
-| 400 文件 / 30 轮（61 版本） | 1.3 MiB | 6.8 MiB | **1.6 MiB**（元数据 65 KiB） |
-| 2000 文件 / 20 轮（41 版本） | 6.4 MiB | 25.0 MiB | **7.4 MiB**（元数据 104 KiB） |
+```yaml
+- insert:
+    - id: dsh-all-rewind
+      name: dsh-all-rewind
+      config:
+        dataDir: D:/dsh-rewind-repo       # 存储根目录（默认 $DSH_HOME/dsh-all-rewind）
+        gitExecutable: git                # git 可执行文件（不在 PATH 时写绝对路径）
+        gitTimeoutMs: 120000              # 单条 git 命令超时
+        keepTurns: 20                     # 每个会话列出的回退点数量
+        conversation:
+          enabled: true                   # 同时就地截断对话
+        respectSandboxPolicy: true        # 只读会话拒绝文件回退
+        autoMaintenance:
+          enabled: true
+          thresholdBytes: 536870912       # 仓库超过约 512 MiB 时自动 gc
+          checkEveryTurns: 5
+        ignoreDirs:                       # 追加到默认重目录列表
+          - my-large-cache/
+        exclude:                          # 原生 gitignore 风格规则
+          - "*.dsh-snap"
+```
 
-固定成本是 `base/content` 镜像（≈ 1× 被跟踪源码）和确实改过的文件内容；
-`keepTurns`、忽略规则与自动维护让长会话保持在合理范围。
+| 字段 | 默认值 | 含义 |
+| --- | --- | --- |
+| `dataDir` | `$DSH_HOME/dsh-all-rewind` | 影子仓库根目录；支持绝对路径、`~/...` 或相对 `$DSH_HOME`。 |
+| `gitExecutable` | `git` | 要执行的 git 命令。 |
+| `gitTimeoutMs` | `120000` | 单条 git 命令超时。 |
+| `keepTurns` | `20` | 超出窗口的旧锚点不再列出（git 对象仍然共享）。 |
+| `conversation.enabled` | `true` | 是否同时回退对话；`false` 表示只回退文件。 |
+| `respectSandboxPolicy` | `true` | 只读会话下拒绝文件回退（除非 force）。 |
+| `autoMaintenance.enabled` | `true` | 是否自动 `git gc`。 |
+| `autoMaintenance.thresholdBytes` | `536870912` | 超过该大小才自动 gc。 |
+| `autoMaintenance.checkEveryTurns` | `5` | 每隔几轮检查一次大小。 |
+| `ignoreDirs`、`ignoreFiles`、`exclude` | 内置列表 | 追加到影子仓库的排除规则。 |
+| `http.enabled` | `true` | 注入界面使用的本地 HTTP API。 |
+| `log` | `true` | 是否把快照/git 失败写进 DSH 日志。 |
+
+---
+
+## 工具
+
+| 工具 | 作用 |
+| --- | --- |
+| `rewind_status` | git 是否可用、存储位置/大小、工作区、会话、回退点数量。 |
+| `rewind_list` | 列出当前会话（或全部会话）的回退点。 |
+| `rewind_restore` | 只回退文件到某一轮（或指定 commit）；不动对话。 |
+| `rewind_prune` | 删除超出 `keepTurns` 的锚点记录。 |
+
+聊天里的按钮走 HTTP API（`POST /dsh-all-rewind/api/rewind`），两部分一起回退；
+工具刻意只动文件，避免 Agent 截断自己的对话。
+
+---
+
+## 从 0.4.x 迁移
+
+0.4.x 在 `<dataDir>/snapshots/` 下按会话存内容寻址快照；0.5.0 改用影子 git。
+两者共用同一个 `dataDir` 根目录，但子目录不同。
+
+1. 安装 0.5.0 并重启 DeepSeek Harness。
+2. 回退点从**下一轮**开始产生；0.4.x 记录的快照不会转换。
+3. `rewind_list`/界面不会显示旧回退点。不需要旧数据的话，直接删除 `<dataDir>/snapshots`
+   （默认 `C:\Users\<你>\.dsh\dsh-all-rewind\snapshots`）；留着也不影响使用。
 
 ---
 
 ## 已知限制
 
-- **只还原文件，不截断对话**：和 TRAE 的按钮一致，聊天记录保留。
-- **只有捕获到的轮次**才有入口：安装前的旧轮次、或被 `keepTurns` 修剪掉的轮次没有。
-- **共享工作区**：并行会话/子代理改同一目录时各自快照独立；回滚其中一个会写回它的文件状态，可能覆盖另一个的并发修改。
-- **大文件与忽略目录不参与版本化**（`maxFileBytes`、`ignoreDirs`）。
-- **只读会话**默认拒绝回滚（可 `force: true`）。
-- 修改 `dataDir` 不会迁移旧快照。
+- **同一工作区只有一条时间线**：同一目录下的所有会话共用一个影子仓库。把会话 A 回退到旧锚点，
+  会连带撤销会话 B 之后在该目录里做的修改。需要并行开发时请用不同工作区。
+- **被忽略的文件不会恢复**：`.gitignore` 或插件排除列表（`node_modules`、`dist` 等）命中的内容
+  既不快照也不回退 —— 这是控制体积的代价。
+- **对话截断在下一次模型请求时正式生效**：DSH 只允许在打开的 turn/step 内追加 surface 节点，
+  所以点击后先做即时视觉折叠，真正的历史截断发生在你发送下一条消息时（输入框已回填被回退的
+  提示词）。会话日志只追加不重写：回退是追加事件，不是改写历史。
+- **被忽略的文件不会恢复**（见下方存储与忽略规则）。
+- **只能回退已完成的轮次**：正在运行的这一轮还没有锚点。
+- `git lfs` 过滤器被绕过（`filter.lfs.*` 被中和）；快照按字节存储：不做 CRLF/LF 转换，
+  Windows 下不跟踪文件权限位，符号链接在 Windows 下按链接文本记录。
+- 工作区过大、超过 `gitTimeoutMs` 时，该轮不会产生锚点（会写日志），其他轮不受影响。
 
 ---
 
 ## 常见问题
 
-**提示词下方没有回退小字？**
-
-1. 安装后是否**重启**了 DeepSeek Harness？插件和客户端 UI 都在启动时加载；
-2. 让 Agent 调 `rewind_status`（或访问 `/dsh-all-rewind/api/status`），确认插件版本与存储路径；
-3. 打开 DevTools 控制台执行 `__dshAllRewind`：`undefined` 说明客户端脚本没注入；
-   `__dshAllRewind.state` 看识别到的会话/回滚点，`__dshAllRewind.reconcile()` 可手动重扫；
-4. 通过插件管理器安装的，确认该 bundle 在当前 profile 已启用。
-
-**较早的提示词没有回退入口？**
-
-那一轮没有快照：插件是之后才启动的，或版本已被 `keepTurns` 修剪。调大 `keepTurns`、重启后新轮次会保留更多历史。
-
-**回退结果里有“跳过”的文件？**
-
-这些文件在快照之后被 AI 回合之外的操作改过。默认策略会覆写（有安全快照兜底）；
-想永远保留手改内容可设 `onConflict: "skip"`。
-
-**磁盘占用高了怎么办？**
-
-用 `rewind_status` 或按钮悬停提示看大小；调小 `keepTurns`、补充 `ignoreDirs`，
-或调用 `POST /api/maintenance`（或 `rewind_prune`）立即修剪并 GC。
-
-**桌面端用终端 CLI 装不了？**
-
-桌面 profile 由应用托管。请通过 DSH Agent / 插件界面安装，或用手动/源码安装方式；
-只有 web profile 支持 `dsh plugin --profile web add …`。
+| 现象 | 处理 |
+| --- | --- |
+| 看不到回退按钮 | 确认 profile 里已有插件条目、`git` 可用（`rewind_status`），并重启 DeepSeek Harness；只有插件加载后开始的轮次才有锚点。 |
+| `CONVERSATION_UNAVAILABLE` | 当前宿主没有 `sessionController`/`workspaceRegistry`（例如 headless 组合）。把 `conversation.enabled` 设为 `false` 即可只回退文件。 |
+| `READ_ONLY_SESSION` | 会话是只读权限预设；切换到允许写工作区的预设，或给工具传 `force`。 |
+| `NO_POINT` | 该轮没有锚点：可能早于插件安装、超过 `gitTimeoutMs`，或已被 `keepTurns` 清理。 |
+| `GIT_UNAVAILABLE` / 完全看不到按钮 | DSH 进程的 PATH 里没有 `git`：安装 Git、重启 DSH，或在配置里设置 `gitExecutable` 绝对路径。`rewind_status` 会显示实际检测到的可执行文件和版本。 |
+| git 报 `index.lock`、`Permission denied`、`Access is denied` | 工作区或数据目录被占用/当前用户不可写（杀毒软件、其他进程、管理员拥有的目录）。关闭占用程序、修权限，或把 `dataDir` 指到可写目录。 |
+| 第一轮很慢 | 首次快照要写入整个工作区（排除项之外）。用 `ignoreDirs`/`exclude` 排除大的构建/依赖目录；之后的快照都是增量的。 |
+| 磁盘持续变大 | 调低 `autoMaintenance.thresholdBytes`，执行 `rewind_prune`，并确认 `node_modules`/构建产物已被排除。 |
+| 点了按钮没反应 | 查看 DSH 日志里的 `dsh-all-rewind` 记录；git 失败会带上命令和 stderr。 |
 
 ---
 
 ## 参与贡献
 
-欢迎提 Issue 和 PR；较大的改动建议先开 Issue 讨论。
+开发环境、测试矩阵和发布流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+问题反馈：<https://github.com/ShaoBei47/dsh-all-rewind/issues>
 
-- 开发环境、测试命令、目录结构、发布流程见 [CONTRIBUTING.md](CONTRIBUTING.md)；
-- PR 前跑一遍：
-
-  ```bash
-  npm test          # node --test test/（Node 22+）
-  npm run smoke     # 端到端冒烟测试
-  ```
-
----
-
-## License
+## 许可证
 
 [MIT](LICENSE)

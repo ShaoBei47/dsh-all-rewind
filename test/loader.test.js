@@ -72,12 +72,25 @@ test('Cordis loader imports the installed package by name and starts it', {
     root.provide('sandboxPolicy', { resolve: () => ({ mode: 'workspace-write' }) })
 
     await root.plugin(Loader, { baseUrl: pathToFileURL(`${profile}${path.sep}`).href })
+    // DSH installs a profile-aware module importer here; the raw loader falls
+    // back to Node's bare resolution, which cannot see a temp profile. Mirror the
+    // real importer so `import('dsh-all-rewind')` resolves inside `node_modules`.
+    root.loader.internal = {
+      async import(name) {
+        if (name.startsWith('.')) return import(pathToFileURL(path.resolve(profile, name)).href)
+        const packageDir = path.join(profile, 'node_modules', ...name.split('/'))
+        const manifest = JSON.parse(fs.readFileSync(path.join(packageDir, 'package.json'), 'utf8'))
+        const entry = path.join(packageDir, manifest.main ?? 'lib/index.js')
+        return import(pathToFileURL(entry).href)
+      },
+    }
     await root.loader.create({ id: 'dsh-all-rewind', name: 'dsh-all-rewind', config: { keepTurns: 5 } })
     await root.loader.await()
     await new Promise((resolve) => setTimeout(resolve, 300))
 
     assert.deepEqual([...tools.keys()].sort(), ['rewind_list', 'rewind_prune', 'rewind_restore', 'rewind_status'])
-    assert.ok(routes.has('/dsh-all-rewind/api/revert'))
+    assert.ok(routes.has('/dsh-all-rewind/api/rewind'))
+    assert.ok(routes.has('/dsh-all-rewind/api/status'))
     assert.ok(routes.has('/dsh-all-rewind/ui.js'))
 
     await root.fiber.dispose()

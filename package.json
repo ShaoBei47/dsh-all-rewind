@@ -1,7 +1,7 @@
 {
   "name": "dsh-all-rewind",
-  "version": "0.4.0",
-  "description": "Conversation-turn rewind for DeepSeek Harness: per-session hidden snapshot repository (before-chat-turn / toolcall anchors), content-addressed directory trees, rewind buttons under each user prompt, configurable snapshot storage and automatic maintenance.",
+  "version": "0.6.0",
+  "description": "TRAE-style rewind for DeepSeek Harness: a per-workspace shadow git repository snapshots the state before every conversation turn, and the rewind action restores workspace files and conversation history together. Small on disk, no changes to your own git repository.",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -10,6 +10,7 @@
     "rollback",
     "snapshot",
     "checkpoint",
+    "shadow-git",
     "ai-ide"
   ],
   "type": "module",
@@ -17,7 +18,8 @@
   "icon": "./icon.png",
   "exports": {
     ".": "./lib/index.js",
-    "./store": "./lib/store.js",
+    "./git": "./lib/git.js",
+    "./shadow": "./lib/shadow.js",
     "./manager": "./lib/manager.js",
     "./package.json": "./package.json"
   },
@@ -39,7 +41,7 @@
     }
   },
   "scripts": {
-    "test": "node --test test/",
+    "test": "node --test \"test/*.test.js\"",
     "test:all": "node test/run-all.mjs",
     "smoke": "node test/smoke.mjs",
     "install:profile": "node install.mjs",

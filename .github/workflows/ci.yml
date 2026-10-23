@@ -23,7 +23,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+      - name: Verify git is available
+        run: git --version
       - name: Test suite
-        run: node --test test/
+        run: node --test "test/*.test.js"
       - name: Smoke test
         run: node test/smoke.mjs

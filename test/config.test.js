@@ -1,4 +1,5 @@
-// Configuration resolution: snapshot storage location + auto maintenance knobs.
+// Configuration resolution: shadow-repository storage location + git and
+// conversation knobs.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import os from 'node:os'
@@ -33,8 +34,8 @@ test('default storage location is $DSH_HOME/dsh-all-rewind', () => {
 })
 
 test('DSH_ALL_REWIND_DIR overrides the default but not an explicit config value', () => {
-  withEnv({ DSH_HOME: 'F:/fake-dsh-home', DSH_ALL_REWIND_DIR: 'G:/snapshots' }, () => {
-    assert.equal(resolveDataDir(undefined), path.normalize('G:/snapshots'))
+  withEnv({ DSH_HOME: 'F:/fake-dsh-home', DSH_ALL_REWIND_DIR: 'G:/rewind-repo' }, () => {
+    assert.equal(resolveDataDir(undefined), path.normalize('G:/rewind-repo'))
     // Explicit config wins over the environment variable.
     assert.equal(resolveDataDir('E:/explicit'), path.normalize('E:/explicit'))
   })
@@ -47,28 +48,45 @@ test('tilde and relative paths are expanded', () => {
   })
 })
 
-test('resolved config exposes storage + auto maintenance defaults', () => {
+test('resolved config exposes git, conversation and maintenance defaults', () => {
   withEnv({ DSH_HOME: 'F:/fake-dsh-home', DSH_ALL_REWIND_DIR: undefined }, () => {
-    const config = resolveConfig({ dataDir: 'H:/snapshots' })
-    assert.equal(config.dataDir, path.normalize('H:/snapshots'))
+    const config = resolveConfig({ dataDir: 'H:/rewind-repo' })
+    assert.equal(config.dataDir, path.normalize('H:/rewind-repo'))
     assert.equal(config.keepTurns, 20)
+    assert.equal(config.gitExecutable, 'git')
+    assert.equal(config.gitTimeoutMs, 120_000)
+    assert.equal(config.conversation.enabled, true)
+    assert.equal(config.respectSandboxPolicy, true)
     assert.equal(config.autoMaintenance.enabled, true)
-    assert.equal(config.autoMaintenance.thresholdBytes, 128 * 1024 * 1024)
-    assert.equal(config.autoMaintenance.checkEveryTurns, 3)
-    assert.equal(config.autoMaintenance.keepVersions, 200)
+    assert.equal(config.autoMaintenance.thresholdBytes, 512 * 1024 * 1024)
+    assert.equal(config.autoMaintenance.checkEveryTurns, 5)
+    assert.ok(config.ignoreDirs.includes('node_modules/'))
+    assert.ok(config.ignoreDirs.includes('dist/'))
 
     const custom = resolveConfig({
+      dataDir: 'H:/rewind-repo',
       keepTurns: 5,
-      autoMaintenance: { enabled: false, thresholdBytes: 20 * 1024 * 1024, checkEveryTurns: 1, keepVersions: 50 },
+      gitExecutable: 'C:/Program Files/Git/cmd/git.exe',
+      gitTimeoutMs: 5000,
+      conversation: { enabled: false },
+      respectSandboxPolicy: false,
+      autoMaintenance: { enabled: false, thresholdBytes: 20 * 1024 * 1024, checkEveryTurns: 1 },
+      ignoreDirs: ['custom-cache'],
+      exclude: ['*.snap'],
     })
     assert.equal(custom.keepTurns, 5)
+    assert.equal(custom.gitExecutable, 'C:/Program Files/Git/cmd/git.exe')
+    assert.equal(custom.gitTimeoutMs, 5000)
+    assert.equal(custom.conversation.enabled, false)
+    assert.equal(custom.respectSandboxPolicy, false)
     assert.equal(custom.autoMaintenance.enabled, false)
     assert.equal(custom.autoMaintenance.thresholdBytes, 20 * 1024 * 1024)
-    assert.equal(custom.autoMaintenance.keepVersions, 50)
+    assert.ok(custom.ignoreDirs.includes('custom-cache'))
+    assert.deepEqual(custom.extraExcludes, ['*.snap'])
   })
 })
 
-test('config.dataDir is honoured by the manager/plugin directory layout', () => {
+test('config.dataDir is honoured by the store directory layout', () => {
   const customDir = makeTempDir('dsh-all-rewind-custom-')
   try {
     const resolved = resolveConfig({ dataDir: customDir })
@@ -93,4 +111,16 @@ test('legacy DSH_TRAE_REWIND_DIR is still honoured during the rename', () => {
       assert.equal(resolveDataDir(undefined), path.normalize('E:/new-snapshots'))
     },
   )
+})
+
+test('out-of-range numbers are clamped instead of rejected', () => {
+  const config = resolveConfig({
+    keepTurns: -4,
+    gitTimeoutMs: 1,
+    autoMaintenance: { thresholdBytes: 1, checkEveryTurns: 999 },
+  })
+  assert.equal(config.keepTurns, 1)
+  assert.equal(config.gitTimeoutMs, 5000)
+  assert.equal(config.autoMaintenance.thresholdBytes, 8 * 1024 * 1024)
+  assert.equal(config.autoMaintenance.checkEveryTurns, 100)
 })

@@ -232,3 +232,55 @@ test('upgrading from dsh-trae-rewind cleans the legacy entry and carries dataDir
     cleanup(profile)
   }
 })
+
+test('a profile that already mounts the bundle gets a config override instead of a duplicate insert', () => {
+  const profile = makeProfile()
+  // Simulate `dsh plugin --profile desktop add dsh-all-rewind`: the package is a
+  // pnpm dependency and mounted through dsh.profile.bundles.
+  fs.writeFileSync(path.join(profile, 'package.json'), JSON.stringify({
+    name: 'dsh-profile-desktop',
+    private: true,
+    dependencies: { 'dsh-all-rewind': 'github:ShaoBei47/dsh-all-rewind' },
+    dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-all-rewind'] } },
+  }, null, 2))
+  // An old manual-managed insert block is still present.
+  const patchFile = path.join(profile, 'cordis.patch.yml')
+  fs.appendFileSync(patchFile, [
+    '',
+    '# >>> dsh-all-rewind (managed by install.mjs)',
+    '- insert:',
+    '    - id: dsh-all-rewind',
+    '      name: dsh-all-rewind',
+    '      config:',
+    '        dataDir: "E:/old-location"',
+    '        keepTurns: 20',
+    '# <<< dsh-all-rewind',
+    '',
+  ].join('\n'))
+  const originalLog = console.log
+  const logs = []
+  console.log = (message) => logs.push(String(message))
+  try {
+    withProfileDir(profile, () => install({ profile: 'desktop', dryRun: false, dataDir: 'G:/new-location' }))
+    const patch = fs.readFileSync(patchFile, 'utf8')
+    assert.equal((patch.match(/- id: dsh-all-rewind/g) ?? []).length, 1, 'one override entry only')
+    assert.ok(!patch.includes('- insert:'), 'no duplicate insert entry')
+    assert.match(patch, /dataDir: "G:\/new-location"/)
+    assert.ok(!patch.includes('E:/old-location'))
+    assert.ok(fs.existsSync(path.join(profile, 'node_modules', 'dsh-all-rewind', 'package.json')), 'package copied')
+    assert.ok(logs.some((line) => line.includes('config override')))
+
+    // Uninstall removes the overlay but keeps the pnpm-installed package: the
+    // profile bundle list still references it.
+    logs.length = 0
+    withProfileDir(profile, () => uninstall({ profile: 'desktop', dryRun: false }))
+    const after = fs.readFileSync(patchFile, 'utf8')
+    assert.ok(!after.includes('dsh-all-rewind'))
+    assert.match(after, /ui-theme/)
+    assert.ok(fs.existsSync(path.join(profile, 'node_modules', 'dsh-all-rewind', 'package.json')), 'bundle package kept')
+    assert.ok(logs.some((line) => line.includes('dsh.profile.bundles')))
+  } finally {
+    console.log = originalLog
+    cleanup(profile)
+  }
+})

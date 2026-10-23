@@ -5,50 +5,58 @@ import path from 'node:path'
 import plugin, { injectUiTag, managerOf, registerTools, TOOL_NAMES } from '../lib/index.js'
 import { resolveConfig } from '../lib/config.js'
 import {
-  cleanup, exists, makeTempDir, makeWorkspace, readFile, writeFiles,
+  cleanup,
+  exists,
+  fakeSession,
+  gitSkipReason,
+  makeTempDir,
+  makeWorkspace,
+  readFile,
+  writeFiles,
 } from './helpers.mjs'
 import { callRoute, createFakeContext, createMockRequest } from './fake-context.mjs'
 
-const DEFAULT_CONFIG = { keepTurns: 20 }
+const skip = gitSkipReason()
 
 function boot(options = {}) {
   const workspace = options.workspace ?? makeWorkspace({ 'a.txt': 'v0', 'src/app.js': 'base' })
   const dataDir = options.dataDir ?? makeTempDir('dsh-all-rewind-plugin-')
   const fake = createFakeContext(options.services ?? {})
-  plugin.apply(fake.ctx, { ...DEFAULT_CONFIG, dataDir })
+  plugin.apply(fake.ctx, { keepTurns: 20, dataDir, ...(options.config ?? {}) })
   const manager = managerOf(fake.ctx)
-  const session = { id: options.sessionId ?? 'session-plugin-1', header: { cwd: workspace } }
-  return { ...fake, manager, workspace, dataDir, session }
+  const sessionId = options.sessionId ?? 'session-plugin-1'
+  const session = fakeSession(sessionId, workspace)
+  return { ...fake, manager, workspace, dataDir, session, sessionId }
 }
 
-async function waitFor(manager) {
-  await manager.drain()
+async function settle(harness) {
+  await harness.manager.settle()
 }
 
-async function seedTurn(harness, turn, { write = {}, callId = `call_${turn}`, tool = 'write' } = {}) {
-  harness.ctx.emit('session/event', harness.session, { type: 'turn/start', data: { turn }, seq: turn, time: Date.now() })
-  await waitFor(harness.manager)
+/** Emit one complete conversation turn, writing `write` files while it runs. */
+async function seedTurn(harness, turn, { write = {}, seqBase = turn * 10 } = {}) {
+  harness.ctx.emit('session/event', harness.session, {
+    type: 'turn/start',
+    seq: seqBase,
+    time: Date.now(),
+    data: { turn },
+  })
+  await settle(harness)
   harness.ctx.emit('session/event', harness.session, {
     type: 'user/message',
+    seq: seqBase + 1,
+    time: Date.now(),
     data: { role: 'user', content: [{ type: 'text', text: `第 ${turn} 轮：改文件` }] },
-    seq: turn,
-    time: Date.now(),
   })
-  await waitFor(harness.manager)
-  if (Object.keys(write).length) writeFiles(harness.workspace, write)
+  await settle(harness)
+  if (Object.keys(write).length > 0) writeFiles(harness.workspace, write)
   harness.ctx.emit('session/event', harness.session, {
-    type: 'tool/call',
-    data: { turn, step: 1, callId, name: tool, arguments: '{}' },
-    seq: turn,
+    type: 'turn/end',
+    seq: seqBase + 2,
     time: Date.now(),
+    data: { turn, reason: { kind: 'completed' } },
   })
-  harness.ctx.emit('session/event', harness.session, {
-    type: 'tool/result',
-    data: { turn, step: 1, message: { role: 'tool', toolCallId: callId, content: [] } },
-    seq: turn,
-    time: Date.now(),
-  })
-  await waitFor(harness.manager)
+  await settle(harness)
 }
 
 test('plugin registers its tools, routes and UI injection with a Cordis-like context', () => {
@@ -61,10 +69,9 @@ test('plugin registers its tools, routes and UI injection with a Cordis-like con
       assert.equal(typeof definition.output.render, 'function')
       assert.equal(definition.parameters.type, 'object')
     }
-    assert.ok(harness.routes.has('/dsh-all-rewind/api/status'))
-    assert.ok(harness.routes.has('/dsh-all-rewind/api/sessions'))
-    assert.ok(harness.routes.has('/dsh-all-rewind/api/points'))
-    assert.ok(harness.routes.has('/dsh-all-rewind/api/revert'))
+    for (const routeName of ['status', 'sessions', 'points', 'rewind', 'prune', 'maintenance']) {
+      assert.ok(harness.routes.has(`/dsh-all-rewind/api/${routeName}`), `route registered: ${routeName}`)
+    }
     assert.ok(harness.routes.has('/dsh-all-rewind/ui.js'))
     assert.equal(harness.taps.length, 1)
     assert.ok(harness.taps[0]('<html><body></body></html>').includes('/dsh-all-rewind/ui.js'))
@@ -95,32 +102,39 @@ test('injectUiTag is idempotent', () => {
   assert.equal(injectUiTag(once), once)
 })
 
-test('full flow: snapshots from session events, rollback through the host tool', async () => {
+test('full flow: shadow-git anchors from session events and a file rollback through the host tool', { skip }, async () => {
   const harness = boot()
   try {
     harness.ctx.emit('session/created', harness.session)
-    await waitFor(harness.manager)
+    await settle(harness)
 
     await seedTurn(harness, 1, { write: { 'a.txt': 'v1', 'new.txt': 'created' } })
     await seedTurn(harness, 2, { write: { 'a.txt': 'v2' } })
     assert.equal(readFile(harness.workspace, 'a.txt'), 'v2')
 
-    const tool = harness.tools.get('rewind_list')
-    const listed = await tool.execute({}, { agent: { id: harness.session.id } })
-    assert.equal(listed.sessionId, harness.session.id)
+    const listTool = harness.tools.get('rewind_list')
+    const listed = await listTool.execute({}, { agent: { id: harness.sessionId } })
+    assert.equal(listed.sessionId, harness.sessionId)
     const turn2 = listed.points.find((point) => point.turn === 2)
     assert.ok(turn2, 'turn 2 point listed')
     assert.equal(turn2.preview, '第 2 轮：改文件')
+    assert.match(turn2.commit, /^[0-9a-f]{40}$/)
+
+    // The shadow repository lives under dataDir/shadows, not inside the workspace.
+    const shadows = fs.readdirSync(path.join(harness.dataDir, 'shadows'))
+    assert.equal(shadows.length, 1)
+    assert.ok(fs.existsSync(path.join(harness.dataDir, 'shadows', shadows[0], 'repo.git', 'HEAD')))
+    assert.ok(fs.existsSync(path.join(harness.dataDir, 'shadows', shadows[0], 'state.json')))
+    assert.equal(fs.existsSync(path.join(harness.workspace, '.git')), false)
 
     const restore = harness.tools.get('rewind_restore')
-    const report = await restore.execute({ target: turn2.version }, { agent: { id: harness.session.id } })
-    assert.equal(report.target.turn, 2)
+    const report = await restore.execute({ turn: 2 }, { agent: { id: harness.sessionId } })
     assert.equal(readFile(harness.workspace, 'a.txt'), 'v1')
     assert.equal(exists(harness.workspace, 'new.txt'), true)
-    assert.ok(report.safetyVersion > 0)
+    assert.match(report.safetyCommit, /^[0-9a-f]{40}$/)
 
-    const turn1 = (await tool.execute({}, { agent: { id: harness.session.id } })).points.find((point) => point.turn === 1)
-    await restore.execute({ target: turn1.version }, { agent: { id: harness.session.id } })
+    const turn1 = (await listTool.execute({}, { agent: { id: harness.sessionId } })).points.find((point) => point.turn === 1)
+    await restore.execute({ turn: turn1.turn }, { agent: { id: harness.sessionId } })
     assert.equal(readFile(harness.workspace, 'a.txt'), 'v0')
     assert.equal(exists(harness.workspace, 'new.txt'), false)
   } finally {
@@ -128,45 +142,128 @@ test('full flow: snapshots from session events, rollback through the host tool',
   }
 })
 
-test('HTTP API lists sessions/points and performs a rollback over POST', async () => {
+test('HTTP API lists sessions/points and rewinds files over POST', { skip }, async () => {
   const harness = boot()
   try {
     harness.ctx.emit('session/created', harness.session)
-    await waitFor(harness.manager)
+    await settle(harness)
     await seedTurn(harness, 1, { write: { 'a.txt': 'v1' } })
+    await seedTurn(harness, 2, { write: { 'a.txt': 'v2' } })
 
-    const sessionsRoute = harness.routes.get('/dsh-all-rewind/api/sessions')
-    const sessionsResponse = await callRoute(sessionsRoute, createMockRequest({
+    const sessionsResponse = await callRoute(harness.routes.get('/dsh-all-rewind/api/sessions'), createMockRequest({
       headers: { host: '127.0.0.1:19387' },
     }))
     assert.equal(sessionsResponse.status, 200)
     const sessionsPayload = JSON.parse(sessionsResponse.body)
     assert.equal(sessionsPayload.sessions.length, 1)
-    assert.equal(sessionsPayload.sessions[0].sessionId, harness.session.id)
+    assert.equal(sessionsPayload.sessions[0].sessionId, harness.sessionId)
 
-    const pointsRoute = harness.routes.get('/dsh-all-rewind/api/points')
-    const pointsResponse = await callRoute(pointsRoute, createMockRequest({
-      url: `/dsh-all-rewind/api/points?sessionId=${harness.session.id}`,
+    const pointsResponse = await callRoute(harness.routes.get('/dsh-all-rewind/api/points'), createMockRequest({
+      url: `/dsh-all-rewind/api/points?sessionId=${harness.sessionId}`,
       headers: { host: '127.0.0.1:19387' },
     }))
     assert.equal(pointsResponse.status, 200)
     const pointsPayload = JSON.parse(pointsResponse.body)
-    assert.ok(pointsPayload.points.length >= 2)
+    assert.deepEqual(pointsPayload.points.map((point) => point.turn), [2, 1])
 
-    const turn1 = pointsPayload.points.find((point) => point.turn === 1)
+    const rewindResponse = await callRoute(harness.routes.get('/dsh-all-rewind/api/rewind'), createMockRequest({
+      method: 'POST',
+      url: '/dsh-all-rewind/api/rewind',
+      headers: { host: '127.0.0.1:19387', 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: harness.sessionId, turn: 2, mode: 'files' }),
+    }))
+    assert.equal(rewindResponse.status, 200, rewindResponse.body)
+    const payload = JSON.parse(rewindResponse.body)
+    assert.equal(payload.ok, true)
+    assert.equal(readFile(harness.workspace, 'a.txt'), 'v1')
+
+    const statusResponse = await callRoute(harness.routes.get('/dsh-all-rewind/api/status'), createMockRequest({
+      headers: { host: '127.0.0.1:19387' },
+    }))
+    const status = JSON.parse(statusResponse.body)
+    assert.equal(status.plugin, 'dsh-all-rewind')
+    assert.equal(status.backend, 'shadow-git')
+    assert.equal(status.git.available, true)
+    assert.ok(status.storage.dataDir)
+    assert.ok(status.storage.diskBytes > 0)
+  } finally {
+    cleanup(harness.workspace, harness.dataDir)
+  }
+})
+
+test('conversation rewind through the wire registers a deferred in-place cut', { skip }, async () => {
+  const harness = boot()
+  try {
+    harness.ctx.emit('session/created', harness.session)
+    await settle(harness)
+    await seedTurn(harness, 1, { write: { 'a.txt': 'v1' } })
     await seedTurn(harness, 2, { write: { 'a.txt': 'v2' } })
 
-    const revertRoute = harness.routes.get('/dsh-all-rewind/api/revert')
-    const revertResponse = await callRoute(revertRoute, createMockRequest({
+    const response = await callRoute(harness.routes.get('/dsh-all-rewind/api/rewind'), createMockRequest({
       method: 'POST',
-      url: '/dsh-all-rewind/api/revert',
+      url: '/dsh-all-rewind/api/rewind',
       headers: { host: '127.0.0.1:19387', 'content-type': 'application/json' },
-      body: JSON.stringify({ sessionId: harness.session.id, target: turn1.version }),
+      body: JSON.stringify({ sessionId: harness.sessionId, turn: 2 }),
     }))
-    assert.equal(revertResponse.status, 200, revertResponse.body)
-    const revertPayload = JSON.parse(revertResponse.body)
-    assert.equal(revertPayload.ok, true)
-    assert.equal(readFile(harness.workspace, 'a.txt'), 'v0')
+    assert.equal(response.status, 200, response.body)
+    const payload = JSON.parse(response.body)
+    assert.equal(payload.conversation.deferred, true)
+    assert.equal(payload.conversation.mode, 'surface-replace')
+    assert.equal(payload.conversation.cutAtSeq, 20)
+    assert.equal(readFile(harness.workspace, 'a.txt'), 'v1')
+
+    const pointsResponse = await callRoute(harness.routes.get('/dsh-all-rewind/api/points'), createMockRequest({
+      url: `/dsh-all-rewind/api/points?sessionId=${harness.sessionId}`,
+      headers: { host: '127.0.0.1:19387' },
+    }))
+    const pointsPayload = JSON.parse(pointsResponse.body)
+    assert.equal(pointsPayload.pendingCut.turn, 2)
+    assert.deepEqual(pointsPayload.points.map((point) => point.turn), [1])
+  } finally {
+    cleanup(harness.workspace, harness.dataDir)
+  }
+})
+
+test('the agent/request waterfall appends the empty system surface replace', { skip }, async () => {
+  const harness = boot()
+  try {
+    harness.ctx.emit('session/created', harness.session)
+    await settle(harness)
+    await seedTurn(harness, 1, { write: { 'a.txt': 'v1' } })
+    await seedTurn(harness, 2, { write: { 'a.txt': 'v2' } })
+    await harness.manager.rewind({ sessionId: harness.sessionId, turn: 2 })
+    await settle(harness)
+
+    const live = { id: harness.sessionId, surface: { nodes: [0, 1, 9, 20, 21] }, appended: [], append(type, data, opts) { this.appended.push({ type, data, opts }) } }
+    harness.ctx.emit('agent/request', { agent: { session: live }, turn: 2, step: 1 }, () => {})
+    assert.equal(live.appended.length, 1)
+    assert.equal(live.appended[0].type, 'system/message')
+    assert.deepEqual(live.appended[0].opts.surfaceOp, { op: 'replace', startSeq: 20, endSeq: 21 })
+    assert.deepEqual(live.appended[0].opts.sourceEventSeqs, [20, 21])
+    assert.deepEqual(live.appended[0].data.message.content, [])
+    assert.equal(harness.manager.pendingCut(harness.sessionId), null)
+  } finally {
+    cleanup(harness.workspace, harness.dataDir)
+  }
+})
+
+test('conversation rewind is refused explicitly when the feature is disabled', { skip }, async () => {
+  const harness = boot({ config: { conversation: { enabled: false } } })
+  try {
+    harness.ctx.emit('session/created', harness.session)
+    await settle(harness)
+    await seedTurn(harness, 1, { write: { 'a.txt': 'v1' } })
+    await seedTurn(harness, 2, { write: { 'a.txt': 'v2' } })
+
+    const response = await callRoute(harness.routes.get('/dsh-all-rewind/api/rewind'), createMockRequest({
+      method: 'POST',
+      url: '/dsh-all-rewind/api/rewind',
+      headers: { host: '127.0.0.1:19387', 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: harness.sessionId, turn: 2 }),
+    }))
+    assert.equal(response.status, 500)
+    assert.equal(JSON.parse(response.body).code, 'CONVERSATION_DISABLED')
+    assert.equal(readFile(harness.workspace, 'a.txt'), 'v2')
   } finally {
     cleanup(harness.workspace, harness.dataDir)
   }
@@ -201,43 +298,44 @@ test('HTTP surface rejects foreign hosts and cross-site requests', async () => {
 test('UI asset route serves the panel script with a JS content type', async () => {
   const harness = boot()
   try {
-    const route = harness.routes.get('/dsh-all-rewind/ui.js')
-    const response = await callRoute(route, createMockRequest({ headers: { host: '127.0.0.1:19387' } }))
+    const response = await callRoute(harness.routes.get('/dsh-all-rewind/ui.js'), createMockRequest({
+      headers: { host: '127.0.0.1:19387' },
+    }))
     assert.equal(response.status, 200)
     assert.match(response.headers['Content-Type'], /javascript/)
     assert.match(response.body, /__dshAllRewind/)
     assert.match(response.body, /var API = '\/dsh-all-rewind'/)
+    assert.match(response.body, /dsh-all-rewind:cut:/)
+    assert.match(response.body, /collapseFromNode/)
+    assert.match(response.body, /backfillComposer/)
   } finally {
     cleanup(harness.workspace, harness.dataDir)
   }
 })
 
-test('plugin degrades gracefully when session snapshots fail (bad workspace)', async () => {
-  const dataDir = makeTempDir('dsh-all-rewind-plugin-')
-  const fake = createFakeContext()
-  plugin.apply(fake.ctx, { ...DEFAULT_CONFIG, dataDir, log: true })
-  const manager = managerOf(fake.ctx)
+test('plugin degrades gracefully when a workspace does not exist', { skip }, async () => {
+  const harness = boot()
   try {
-    const missingWorkspace = path.join(dataDir, 'does-not-exist')
-    const session = { id: 'session-bad', header: { cwd: missingWorkspace } }
-    fake.ctx.emit('session/created', session)
-    fake.ctx.emit('session/event', session, { type: 'turn/start', data: { turn: 1 }, seq: 1, time: Date.now() })
-    await manager.drain()
+    const missingWorkspace = path.join(harness.dataDir, 'does-not-exist')
+    const session = fakeSession('session-bad', missingWorkspace)
+    harness.ctx.emit('session/created', session)
+    await harness.manager.settle()
     // A missing workspace is skipped with a log, not thrown into the event bus.
-    assert.ok(fake.logs.length > 0)
-    assert.equal(manager.listSessions().length, 0)
+    assert.ok(harness.logs.length > 0)
+    assert.equal(harness.manager.sessions().length, 0)
   } finally {
-    cleanup(dataDir)
+    cleanup(harness.workspace, harness.dataDir)
   }
 })
 
-test('plugin apply returns the manager and exposes config helpers', () => {
+test('plugin apply exposes the manager and its helpers', () => {
   const harness = boot()
   try {
     assert.ok(harness.manager)
     assert.equal(harness.manager.helpers.API_PREFIX, '/dsh-all-rewind')
     const resolved = resolveConfig({ keepTurns: 3 })
     assert.equal(resolved.keepTurns, 3)
+    assert.equal(resolved.conversation.enabled, true)
   } finally {
     cleanup(harness.workspace, harness.dataDir)
   }
@@ -247,13 +345,13 @@ test('registerTools refuses unknown callers via the caller session default', asy
   const workspace = makeWorkspace({ 'a.txt': 'v0' })
   const dataDir = makeTempDir('dsh-all-rewind-plugin-')
   const fake = createFakeContext()
-  plugin.apply(fake.ctx, { ...DEFAULT_CONFIG, dataDir })
+  plugin.apply(fake.ctx, { dataDir })
   const manager = managerOf(fake.ctx)
   try {
     const disposers = registerTools(fake.ctx, manager)
     assert.equal(disposers.length, TOOL_NAMES.length)
     const restore = fake.tools.get('rewind_restore')
-    await assert.rejects(() => restore.execute({ target: 1 }, {}), /sessionId/)
+    await assert.rejects(() => restore.execute({ turn: 1 }, {}), /sessionId/)
     for (const dispose of disposers) dispose()
     assert.equal(fake.tools.size, 0)
   } finally {

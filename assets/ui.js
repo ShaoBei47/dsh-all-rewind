@@ -1,14 +1,16 @@
-/* dsh-all-rewind — client panel (v0.3).
+/* dsh-all-rewind — per-prompt rewind action (v0.6, in-place conversation cut).
  *
- * Renders a small "回退到本轮对话之前" action directly under every user prompt
- * bubble, matching the TRAE placement (per-message, not a floating widget).
- * The chat DOM already exposes stable attributes:
+ * Renders a small "回退到此处" action directly under every user prompt bubble,
+ * matching the TRAE placement (per-message, not a floating widget). The chat DOM
+ * already exposes stable attributes:
  *   - [data-conversation-session]                 current session id
  *   - [data-chat-flow-kind="user"][data-chat-turn] one user prompt + its turn
  *
- * React owns that DOM, so we only APPEND our own node inside the user flow item
- * and re-attach it through a MutationObserver if React replaces the subtree.
- * Clicking the action asks for confirmation and POSTs /api/revert.
+ * Clicking the action restores workspace files immediately and *collapses* the
+ * conversation from that prompt onwards in the DOM. The authoritative history cut
+ * is a deferred surface replace the host appends on the next model request
+ * (DSH only accepts a system/message inside an open turn/step), so this script
+ * also backfills the prompt into the composer for editing and re-sending.
  */
 (function () {
   'use strict'
@@ -18,12 +20,17 @@
   var API = '/dsh-all-rewind'
   var ROOT_SELECTOR = '[data-conversation-session]'
   var USER_SELECTOR = '[data-chat-flow-kind="user"][data-chat-turn]'
+  var FLOW_SELECTOR = '[data-chat-flow-kind]'
   var BUTTON_MARKER = 'data-dsh-all-rewind'
+  var HIDDEN_MARKER = 'data-dar-hidden'
+  var CUT_KEY_PREFIX = 'dsh-all-rewind:cut:'
 
   var state = {
     sessionId: null,
     points: new Map(),       // turn -> rewind point
     storage: null,
+    git: null,
+    pendingCut: null,
     fetching: false,
     lastFetchAt: 0,
     busy: false,
@@ -49,6 +56,8 @@
         if (!response.ok) {
           var failure = new Error((data && (data.error || data.message)) || ('HTTP ' + response.status))
           failure.status = response.status
+          failure.code = data && data.code
+          failure.result = data && data.result
           throw failure
         }
         return data
@@ -71,7 +80,7 @@
       'background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}',
       '.dar-turn-revert-btn[disabled]{cursor:default;opacity:.45}',
       '.dar-toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);z-index:2147483000;',
-      'max-width:min(560px,calc(100vw - 40px));padding:9px 14px;border-radius:10px;',
+      'max-width:min(620px,calc(100vw - 40px));padding:9px 14px;border-radius:10px;',
       'border:1px solid var(--dsw-alias-border-l2,#3a3a42);',
       'background:var(--dsw-alias-button-floating-fill,#1f2024);color:var(--dsw-alias-label-primary,#e9e9ec);',
       'box-shadow:0 10px 34px rgba(0,0,0,.32);',
@@ -95,7 +104,7 @@
     if (toastTimer) clearTimeout(toastTimer)
     toastTimer = setTimeout(function () {
       if (toastNode) toastNode.style.display = 'none'
-    }, kind === 'error' ? 9000 : 6500)
+    }, kind === 'error' ? 9000 : 8000)
   }
 
   function formatBytes(bytes) {
@@ -107,6 +116,10 @@
       unit += 1
     }
     return value.toFixed(unit === 0 ? 0 : 1) + ' ' + units[unit]
+  }
+
+  function normalize(text) {
+    return String(text == null ? '' : text).replace(/\s+/g, '')
   }
 
   // --------------------------------------------------------------- plumbing
@@ -133,11 +146,12 @@
 
   function buttonTitle(point) {
     var parts = [buttonLabel(point)]
-    if (point.changed) parts.push('本轮改动 ' + point.changed + ' 个文件')
     if (point.preview) parts.push('「' + point.preview + '」')
+    parts.push('同时回退对话与工作区文件')
     if (state.storage && state.storage.dataDir) {
-      parts.push('快照: ' + state.storage.dataDir + (state.storage.diskBytes ? '（' + formatBytes(state.storage.diskBytes) + '）' : ''))
+      parts.push('快照仓库: ' + state.storage.dataDir + (state.storage.diskBytes ? '（' + formatBytes(state.storage.diskBytes) + '）' : ''))
     }
+    if (state.git && state.git.available) parts.push('git ' + (state.git.version || ''))
     return parts.join(' · ')
   }
 
@@ -171,11 +185,126 @@
     button.appendChild(icon)
     button.appendChild(label)
     button.addEventListener('click', function () {
-      revert(point)
+      revert(point, node)
     })
     wrapper.appendChild(button)
     node.appendChild(wrapper)
   }
+
+  // ------------------------------------------------------------- DOM collapse
+
+  /** The top-level transcript element that owns one flow node. */
+  function flowTop(node) {
+    var root = node.closest(ROOT_SELECTOR) || document.body
+    var top = node
+    while (top.parentElement && top.parentElement !== root) {
+      var parent = top.parentElement
+      if (parent.querySelectorAll(FLOW_SELECTOR).length >= 2) break
+      top = parent
+    }
+    return { top: top, root: root }
+  }
+
+  function hideElement(el) {
+    if (!el || el.nodeType !== 1) return
+    el.setAttribute(HIDDEN_MARKER, '1')
+    el.style.display = 'none'
+  }
+
+  /** Hide the prompt and every flow node after it (visual TRAE collapse). */
+  function collapseFromNode(node) {
+    var located = flowTop(node)
+    var current = located.top
+    var guard = 0
+    while (current && current !== located.root && guard < 500) {
+      guard += 1
+      var next = current.nextElementSibling
+      if (current.nodeType === 1 && (current.matches(FLOW_SELECTOR) || current.querySelector(FLOW_SELECTOR))) {
+        hideElement(current)
+      }
+      current = next
+    }
+  }
+
+  function clearHidden() {
+    var hidden = document.querySelectorAll('[' + HIDDEN_MARKER + ']')
+    for (var index = 0; index < hidden.length; index += 1) {
+      hidden[index].removeAttribute(HIDDEN_MARKER)
+      hidden[index].style.display = ''
+    }
+  }
+
+  function findUserNodeForCut(cut) {
+    var nodes = userNodes()
+    if (!nodes.length) return null
+    if (cut && cut.turn != null) {
+      for (var index = 0; index < nodes.length; index += 1) {
+        if (nodes[index].getAttribute('data-chat-turn') === String(cut.turn)) return nodes[index]
+      }
+    }
+    var key = normalize(cut && cut.key)
+    if (!key) return null
+    for (var index2 = 0; index2 < nodes.length; index2 += 1) {
+      if (normalize(nodes[index2].textContent).indexOf(key) !== -1) return nodes[index2]
+    }
+    return null
+  }
+
+  /** Re-apply a persisted visual cut after a reload / session switch. */
+  function applyStoredCut() {
+    var sessionId = state.sessionId
+    if (!sessionId) return
+    var raw = null
+    try { raw = localStorage.getItem(CUT_KEY_PREFIX + sessionId) } catch (error) { raw = null }
+    if (!raw) return
+    var cut = null
+    try { cut = JSON.parse(raw) } catch (error) { cut = null }
+    var node = findUserNodeForCut(cut)
+    if (!node) {
+      // The surface cut already landed: no prompt to hide any more.
+      if (!state.pendingCut) {
+        try { localStorage.removeItem(CUT_KEY_PREFIX + sessionId) } catch (error) { /* ignore */ }
+      }
+      return
+    }
+    collapseFromNode(node)
+    if (!state.pendingCut) {
+      // The host no longer reports a pending cut; the transcript is being
+      // replaced by the client. Keep the visual state until React re-renders.
+      try { localStorage.removeItem(CUT_KEY_PREFIX + sessionId) } catch (error) { /* ignore */ }
+    }
+  }
+
+  // ------------------------------------------------------------------ composer
+
+  /** Put the reverted prompt back into the composer so the user can edit/send. */
+  function backfillComposer(text) {
+    if (!text) return false
+    var editor = document.querySelector('[contenteditable="true"]')
+    if (!editor) return false
+    try {
+      editor.focus()
+      var selection = window.getSelection ? window.getSelection() : null
+      if (selection) {
+        var range = document.createRange()
+        range.selectNodeContents(editor)
+        selection.removeAllRanges()
+        selection.addRange(range)
+      }
+      var applied = false
+      if (typeof document.execCommand === 'function') {
+        try { applied = document.execCommand('insertText', false, text) } catch (error) { applied = false }
+      }
+      // Fall back to a plain assignment when execCommand is unavailable or the
+      // editor is a simple contenteditable without a working selection.
+      if (!applied || normalize(editor.textContent) !== normalize(text)) editor.textContent = text
+      return true
+    } catch (error) {
+      return false
+    }
+  }
+
+  // --------------------------------------------------------------- reconcile
 
   function reconcile() {
     scheduled = false
@@ -185,7 +314,9 @@
       state.sessionId = sessionId
       state.points = new Map()
       state.lastFetchAt = 0
+      state.pendingCut = null
       fetchPoints()
+      return
     }
     var nodes = userNodes()
     for (var index = 0; index < nodes.length; index += 1) {
@@ -207,6 +338,7 @@
       var ownerKind = owner && owner.getAttribute ? owner.getAttribute('data-chat-flow-kind') : null
       if (ownerKind !== 'user') stale[staleIndex].remove()
     }
+    applyStoredCut()
   }
 
   function scheduleReconcile() {
@@ -228,49 +360,84 @@
       if (sessionId !== state.sessionId) return
       var payload = results[0] || {}
       var status = results[1]
-      if (status && status.storage) state.storage = status.storage
+      if (status) {
+        if (status.storage) state.storage = status.storage
+        if (status.git) state.git = status.git
+      }
+      state.pendingCut = payload.pendingCut || null
       var map = new Map()
       var points = payload.points || []
       for (var index = 0; index < points.length; index += 1) {
         var point = points[index]
-        if (point.type !== 'before-chat-turn' || !Number.isFinite(point.turn)) continue
+        if (!Number.isFinite(point.turn)) continue
         map.set(point.turn, point)
       }
       state.points = map
       reconcile()
     }).catch(function (error) {
       state.fetching = false
-      showToast('读取回滚点失败：' + (error && error.message ? error.message : error), 'error')
+      showToast('读取回退点失败：' + (error && error.message ? error.message : error), 'error')
     })
   }
 
-  function revert(point) {
+  function confirmRewind(point) {
+    return window.confirm([
+      '回退到第 ' + point.turn + ' 轮对话发起之前？',
+      '',
+      '· 工作区文件恢复到该轮开始前的状态（该轮及之后 AI 的修改被撤销）',
+      '· 对话立即折叠，并在你发送下一条消息时从模型历史中正式移除（不是新开对话）',
+      '· 该条提示词会回填到输入框，可修改后重新发送',
+      '· 回退前会自动记录安全快照，之后仍可找回当前文件状态',
+    ].join('\n'))
+  }
+
+  function revert(point, node) {
     if (state.busy) return
-    var ok = window.confirm(
-      '回退到第 ' + point.turn + ' 轮对话发起之前？\n\n'
-      + '· 该轮及之后 AI 对工作区文件的修改将被撤销\n'
-      + '· 回退前会自动记录安全快照，可再次回退\n'
-      + '· 已打开的文件请在编辑器中重新打开以刷新内容',
-    )
-    if (!ok) return
+    if (!confirmRewind(point)) return
     state.busy = true
     showToast('正在回退到第 ' + point.turn + ' 轮之前…', 'ok')
-    api('/api/revert', { body: { sessionId: state.sessionId, target: point.version } })
+    api('/api/rewind', {
+      body: { sessionId: state.sessionId, turn: point.turn, mode: 'all' },
+    })
       .then(function (result) {
         state.busy = false
+        var files = result.files || {}
+        var restored = (files.restored || []).length
+        var removed = (files.removed || []).length
+        // Visual collapse happens immediately; the authoritative surface cut is
+        // applied by the host on the next model request.
+        collapseFromNode(node)
+        try {
+          localStorage.setItem(CUT_KEY_PREFIX + state.sessionId, JSON.stringify({
+            turn: point.turn,
+            key: point.prompt || point.preview || '',
+            at: Date.now(),
+          }))
+        } catch (error) {
+          // hiding already happened; persistence is best effort
+        }
+        var backfilled = backfillComposer(point.prompt || '')
+        state.pendingCut = result.conversation || null
         var lines = [
-          '已回退到第 ' + point.turn + ' 轮之前：还原 ' + result.restored.length + ' 个文件，删除 '
-            + result.removed.length + ' 个文件',
+          '已回退到第 ' + point.turn + ' 轮之前：恢复 ' + restored + ' 个文件，删除 ' + removed + ' 个文件',
+          result.conversation && result.conversation.deferred
+            ? '对话已折叠；发送下一条消息时从模型历史中正式移除'
+            : '对话已折叠',
         ]
-        if (result.skipped && result.skipped.length) lines.push('跳过 ' + result.skipped.length + ' 个外部改动文件')
-        if (result.warnings && result.warnings.length) lines.push('警告：' + result.warnings.length + ' 个文件未还原')
-        if (result.safetyVersion) lines.push('安全快照 v' + result.safetyVersion)
+        if (backfilled) lines.push('原提示词已回填到输入框，可直接修改重发')
         showToast(lines.join('\n'), 'ok')
-        return fetchPoints()
+        fetchPoints()
       })
       .catch(function (error) {
         state.busy = false
-        showToast('回退失败：' + (error && error.message ? error.message : error), 'error')
+        var lines = ['回退失败：' + (error && error.message ? error.message : error)]
+        if (error && error.result && error.result.files) {
+          var files = error.result.files
+          lines.push('文件已回退：恢复 ' + (files.restored || []).length + ' 个，删除 ' + (files.removed || []).length + ' 个')
+          lines.push('对话未回退，可再次点击重试')
+        }
+        showToast(lines.join('\n'), 'error')
+        fetchPoints()
       })
   }
 
@@ -283,7 +450,8 @@
       var observer = new MutationObserver(function () { scheduleReconcile() })
       observer.observe(document.body, { childList: true, subtree: true })
     }
-    // Light polling: each new turn adds a rewind point.
+    // Light polling: each new turn adds a rewind point, and the pending cut
+    // disappears once the host applied it to the model history.
     setInterval(function () {
       if (!currentSessionId()) return
       if (Date.now() - state.lastFetchAt < 2500) return

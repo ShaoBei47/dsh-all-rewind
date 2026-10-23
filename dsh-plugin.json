@@ -3,7 +3,7 @@
   "manifestVersion": "0.15",
   "id": "dsh-all-rewind",
   "name": "dsh-all-rewind",
-  "version": "0.4.0",
+  "version": "0.6.0",
   "license": "MIT",
   "facets": {
     "host": {
@@ -21,19 +21,19 @@
   },
   "permissions": [
     {
-      "name": "dsh-all-rewind.fs.snapshot",
+      "name": "dsh-all-rewind.git.snapshot",
       "scope": "filesystem-read",
-      "reason": "Scan the session workspace to build content-addressed file snapshots for turn-level rollback."
+      "reason": "Run `git add`/`write-tree` through the shadow repository to snapshot the workspace before every conversation turn."
     },
     {
-      "name": "dsh-all-rewind.fs.restore",
+      "name": "dsh-all-rewind.git.restore",
       "scope": "workspace-write",
-      "reason": "Restore workspace files to the selected turn snapshot when the user explicitly asks to roll back."
+      "reason": "Run `git read-tree` to restore workspace files when the user explicitly rewinds to an earlier turn."
     },
     {
-      "name": "dsh-all-rewind.fs.store",
+      "name": "dsh-all-rewind.git.store",
       "scope": "dsh-home",
-      "reason": "Keep the hidden per-session git snapshot repository under the DSH home directory."
+      "reason": "Keep one shadow git repository per workspace under the plugin data directory (configurable with dataDir)."
     }
   ],
   "contributes": {
@@ -41,7 +41,7 @@
       {
         "icon": "./icon.png",
         "title": "All Rewind",
-        "description": "对话轮次回滚：每条提示词下方可回退到该轮对话发起之前，并同步还原工作区文件。"
+        "description": "对话轮次回退：每条提示词下方可回到该轮对话之前；对话在当前会话内就地折叠并从模型历史移除，工作区文件同步回退，影子 git 存储、占用小且不碰你自己的仓库。"
       }
     ]
   }
