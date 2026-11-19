@@ -1,7 +1,7 @@
 {
   "name": "dsh-all-rewind",
-  "version": "0.6.0",
-  "description": "TRAE-style rewind for DeepSeek Harness: a per-workspace shadow git repository snapshots the state before every conversation turn, and the rewind action restores workspace files and conversation history together. Small on disk, no changes to your own git repository.",
+  "version": "0.7.0",
+  "description": "TRAE-style rewind for DeepSeek Harness: a per-workspace shadow git repository snapshots the state before every conversation turn, and the rewind action restores workspace files and conversation history together. A global FIFO budget (default 100 MiB) keeps the shadow store small, no changes to your own git repository.",
   "keywords": [
     "dsh",
     "dsh-plugin",

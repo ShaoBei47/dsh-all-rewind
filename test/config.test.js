@@ -4,7 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import os from 'node:os'
 import path from 'node:path'
-import { defaultDataDir, dshHome, resolveConfig, resolveDataDir } from '../lib/config.js'
+import { defaultDataDir, dshHome, resolveConfig, resolveDataDir, resolveMaxTotalBytes } from '../lib/config.js'
 import { cleanup, makeTempDir } from './helpers.mjs'
 
 function withEnv(patch, fn) {
@@ -60,12 +60,14 @@ test('resolved config exposes git, conversation and maintenance defaults', () =>
     assert.equal(config.autoMaintenance.enabled, true)
     assert.equal(config.autoMaintenance.thresholdBytes, 512 * 1024 * 1024)
     assert.equal(config.autoMaintenance.checkEveryTurns, 5)
+    assert.equal(config.maxTotalBytes, 100 * 1024 * 1024)
     assert.ok(config.ignoreDirs.includes('node_modules/'))
     assert.ok(config.ignoreDirs.includes('dist/'))
 
     const custom = resolveConfig({
       dataDir: 'H:/rewind-repo',
       keepTurns: 5,
+      maxTotalBytes: 25 * 1024 * 1024,
       gitExecutable: 'C:/Program Files/Git/cmd/git.exe',
       gitTimeoutMs: 5000,
       conversation: { enabled: false },
@@ -75,6 +77,7 @@ test('resolved config exposes git, conversation and maintenance defaults', () =>
       exclude: ['*.snap'],
     })
     assert.equal(custom.keepTurns, 5)
+    assert.equal(custom.maxTotalBytes, 25 * 1024 * 1024)
     assert.equal(custom.gitExecutable, 'C:/Program Files/Git/cmd/git.exe')
     assert.equal(custom.gitTimeoutMs, 5000)
     assert.equal(custom.conversation.enabled, false)
@@ -123,4 +126,17 @@ test('out-of-range numbers are clamped instead of rejected', () => {
   assert.equal(config.gitTimeoutMs, 5000)
   assert.equal(config.autoMaintenance.thresholdBytes, 8 * 1024 * 1024)
   assert.equal(config.autoMaintenance.checkEveryTurns, 100)
+})
+
+test('maxTotalBytes defaults to 100 MiB and can be disabled or capped', () => {
+  assert.equal(resolveMaxTotalBytes(undefined), 100 * 1024 * 1024)
+  assert.equal(resolveMaxTotalBytes(null), 0)
+  assert.equal(resolveMaxTotalBytes(false), 0)
+  assert.equal(resolveMaxTotalBytes(0), 0)
+  assert.equal(resolveMaxTotalBytes(-5), 0)
+  assert.equal(resolveMaxTotalBytes('not-a-number'), 100 * 1024 * 1024)
+  assert.equal(resolveMaxTotalBytes(1024 * 1024), 1024 * 1024)
+  assert.equal(resolveMaxTotalBytes(1024 * 1024 * 1024 * 1024), 64 * 1024 * 1024 * 1024)
+  // `maxBytes` is accepted as a shorthand alias.
+  assert.equal(resolveConfig({ maxBytes: 8 * 1024 * 1024 }).maxTotalBytes, 8 * 1024 * 1024)
 })

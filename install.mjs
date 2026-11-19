@@ -107,7 +107,7 @@ function patchEntry(dataDir) {
     '      config:',
   ]
   if (dataDir) lines.push(`        dataDir: ${JSON.stringify(String(dataDir))}`)
-  lines.push('        keepTurns: 20', MARKER_END, '')
+  lines.push('        keepTurns: 20', '        maxTotalBytes: 104857600', MARKER_END, '')
   return lines.join('\n')
 }
 
@@ -124,6 +124,7 @@ function patchOverride(dataDir) {
     '  config:',
     `    dataDir: ${JSON.stringify(String(dataDir))}`,
     '    keepTurns: 20',
+    '    maxTotalBytes: 104857600',
     MARKER_END,
     '',
   ]

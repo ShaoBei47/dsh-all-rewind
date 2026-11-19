@@ -205,6 +205,42 @@ test('exclude text carries defaults and configured extra patterns', { skip }, ()
   assert.match(text, /\.git\//)
 })
 
+test('a snapshot repairs a shadow repository whose object store was deleted', { skip }, async () => {
+  const workspace = makeWorkspace({ 'a.txt': 'v0' })
+  const dataDir = makeTempDir('dsh-all-rewind-git-')
+  try {
+    const repo = await makeRepo(workspace, dataDir)
+    const first = await repo.snapshot({ message: 'turn 1' })
+    assert.equal(await repo.hasCommit(first.commit), true)
+
+    // Simulate a manual cache cleanup that removed the git object store.
+    fs.rmSync(path.join(repo.dir, 'objects'), { recursive: true, force: true })
+
+    const second = await repo.snapshot({ message: 'turn 2' })
+    assert.equal(second.reused, false)
+    assert.match(second.commit, /^[0-9a-f]{40}$/)
+    await repo.restore(second.commit)
+    assert.equal(readFile(workspace, 'a.txt'), 'v0')
+  } finally {
+    cleanup(workspace, dataDir)
+  }
+})
+
+test('the shadow repository is recreated after a missing object store', { skip }, async () => {
+  const workspace = makeWorkspace({ 'keep.txt': 'v0' })
+  const dataDir = makeTempDir('dsh-all-rewind-git-')
+  try {
+    const repo = await makeRepo(workspace, dataDir)
+    await repo.snapshot({ message: 'turn 1' })
+    fs.rmSync(path.join(repo.dir, 'objects'), { recursive: true, force: true })
+    const again = await repo.ensure({ excludeText: '' })
+    assert.equal(again.reinitialized, true)
+    assert.equal(await repo.head(), undefined)
+  } finally {
+    cleanup(workspace, dataDir)
+  }
+})
+
 test('a workspace directory that disappears fails the snapshot without hanging', { skip }, async () => {
   const workspace = makeWorkspace({ 'a.txt': 'x' })
   const dataDir = makeTempDir('dsh-all-rewind-git-')

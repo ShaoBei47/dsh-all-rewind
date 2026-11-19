@@ -4,6 +4,43 @@ All notable changes to `dsh-all-rewind` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-11
+
+### Added
+
+- **Global FIFO storage budget.** New `maxTotalBytes` config (default **100 MiB**) caps the sum of
+  every shadow repository under `dataDir`. When exceeded, the oldest snapshots are deleted first
+  across all workspaces; the retained anchors are re-rooted (trees are reused, only commit objects
+  are written), the index/reflog are cleared and `git gc --prune=now` reclaims the dropped blobs.
+- **Strict oversize handling.** A snapshot that alone exceeds the whole budget cannot be kept:
+  it is deleted as well, its workspace records `paused: { reason: 'snapshot-exceeds-budget' }` and
+  snapshotting stops for that workspace. A retry happens after at least 30 minutes and only when
+  the workspace shrank by 20% or `maxTotalBytes` was raised, so an unchanged multi-GB workspace
+  never causes repeated giant writes. `rewind_status` now reports
+  `storage.maxBytes`, `storage.overBudget`, `storage.pausedWorkspaces`, per-workspace `paused` and
+  the last enforcement summary (`budget`).
+- Per-snapshot byte accounting (`bytes` on every turn anchor / safety snapshot) and enforcement
+  after every snapshot and every restore. The budget runs once at plugin startup as well, so a
+  store left over the cap by an older version is trimmed without a new turn.
+- `maxBytes` is accepted as an alias for `maxTotalBytes`; `0` disables the budget
+  (the pre-0.7 `keepTurns` + `autoMaintenance` behaviour).
+
+### Fixed
+
+- **Unbounded shadow-git history.** 0.5.0 removed the 0.4.x `pruneVersions()` mechanism without a
+  replacement: every turn commit stayed reachable from `refs/heads/main`, so `git gc` could never
+  free anything and binary files changed every turn (VS databases, PCH, build output) grew the
+  store without limit. The FIFO budget now bounds the store.
+- A shadow repository that lost its `objects/` directory (manual cache cleanup) is detected and
+  re-initialized on the next snapshot instead of failing forever; stale anchors are cleared.
+
+### Changed
+
+- `install.mjs` writes `maxTotalBytes: 104857600` into the managed profile block.
+- Documentation: the disk-usage chapter and the "disk keeps growing" troubleshooting entry now
+  describe the budget and the paused-workspace behaviour instead of suggesting `git gc` knobs that
+  did not free history.
+
 ## [0.6.0] - 2026-10
 
 ### Changed

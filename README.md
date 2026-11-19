@@ -36,14 +36,18 @@ never modified (its index, objects, refs and work tree stay exactly as they were
   surface replace); the original prompt is put back into the composer for editing.
 - **Small on disk** - a real git object store per workspace (one commit per turn). Only changed
   content is written; `git gc` packs similar file versions into deltas.
+- **Bounded storage** - one hard cap for the *whole* store (default 100 MiB, `maxTotalBytes`).
+  When it is exceeded the oldest snapshots of every workspace are deleted first (FIFO) and the
+  remaining history is rewritten so the space is really reclaimed. A single snapshot larger than
+  the whole budget is deleted as well; its workspace pauses snapshotting and only retries (after at
+  least 30 minutes) when the workspace shrank by 20% or `maxTotalBytes` was raised.
+  `rewind_status` reports the cap, current usage and paused workspaces.
 - **Does not touch your repository** - the shadow `GIT_DIR` lives under the plugin data directory
   (default `~/.dsh/dsh-all-rewind`), which is configurable.
 - **Respects ignore rules** - your `.gitignore` plus a default list of heavy build/dependency
   directories (`node_modules/`, `dist/`, `build/`, `.venv/`, ...) are never snapshotted.
 - **Reversible rollback** - the current state is committed as a safety snapshot before files are
   restored, so nothing is lost if you rewind too far.
-- **Bounded storage** - only the newest `keepTurns` anchors are listed per session, and `git gc`
-  runs automatically once the store grows past a threshold.
 - **Works without a git repository** - the shadow repository is created by the plugin, so any
   workspace folder can be snapshotted, not only folders that already are git repositories.
 - **Per-workspace storage** - all sessions of one workspace share one repository.
@@ -203,11 +207,25 @@ Snapshot data under `dataDir` is left in place; delete it manually if you no lon
 
 ### Disk usage
 
-One `git add` per turn plus one commit: unchanged content maps to the same object, and `git gc`
-(automatic once the store exceeds `autoMaintenance.thresholdBytes`) repacks changed files so that
-successive versions of large files are delta-compressed. A typical project with a few edited files
-per turn stays in the low megabytes; the first commit is small because `node_modules/`, `dist/`
-and friends are excluded.
+One `git add` per turn plus one commit: unchanged content maps to the same object, so the store
+only grows with the content that actually changed. Git history alone never shrinks, which is why
+the plugin also enforces a global budget:
+
+- `maxTotalBytes` (default **100 MiB**) is the hard cap for the sum of every workspace store
+  under `dataDir`.
+- When the cap is exceeded, snapshots are deleted **oldest first (FIFO)** across all workspaces.
+  The kept anchors are re-rooted and the reflog is expired, so `git gc --prune=now` really frees
+  the dropped blobs.
+- If one snapshot alone is larger than the whole budget (for example a workspace that contains
+  multi-gigabyte build caches), that snapshot is deleted too: the workspace keeps **no** rewind
+  point and snapshotting pauses; a retry happens after at least 30 minutes and only when the
+  workspace shrank by 20% or `maxTotalBytes` was raised (so an unchanged multi-GB workspace never
+  causes repeated gigabytes of writes). `rewind_status` shows `storage.pausedWorkspaces` and the
+  workspace's `paused` reason.
+- Big binary files that are regenerated every turn (`.vs` databases, PCH, build output) are the
+  usual reason a store grows fast. Excluding them with `.gitignore` / `ignoreDirs` / `exclude`
+  keeps the budget for useful history. Raised the cap? Set `maxTotalBytes: 0` to disable the
+  budget and only use `keepTurns` + `autoMaintenance`.
 
 ---
 
@@ -224,6 +242,7 @@ All fields are optional. Put them under the plugin entry in the profile's `cordi
         gitExecutable: git                # git binary (full path if not on PATH)
         gitTimeoutMs: 120000              # cap for one git command
         keepTurns: 20                     # listed rewind points per session
+        maxTotalBytes: 104857600          # hard cap for the whole store (100 MiB; 0 = no cap)
         conversation:
           enabled: true                   # truncate the conversation in place too
         respectSandboxPolicy: true        # refuse file rewinds in read-only sessions
@@ -242,7 +261,8 @@ All fields are optional. Put them under the plugin entry in the profile's `cordi
 | `dataDir` | `$DSH_HOME/dsh-all-rewind` | Shadow-repository root. Absolute, `~/...`, or relative to `$DSH_HOME`. |
 | `gitExecutable` | `git` | Git command to run. |
 | `gitTimeoutMs` | `120000` | Timeout for a single git command. |
-| `keepTurns` | `20` | Oldest anchors beyond this window are no longer listed. Git objects stay shared. |
+| `keepTurns` | `20` | Oldest anchors beyond this window are no longer listed. Git objects are subject to the budget. |
+| `maxTotalBytes` | `104857600` (100 MiB) | Hard cap for the sum of every shadow repository. Oldest snapshots are deleted first (FIFO); a single snapshot bigger than the cap is deleted too and its workspace pauses. `0` disables the cap. |
 | `conversation.enabled` | `true` | Also rewind the conversation. `false` = files-only plugin. |
 | `respectSandboxPolicy` | `true` | Refuse file rewinds in a read-only session unless forced. |
 | `autoMaintenance.enabled` | `true` | Run `git gc` automatically. |
@@ -315,7 +335,7 @@ subdirectories.
 | `GIT_UNAVAILABLE` / no actions at all | `git` is not on the DSH process's `PATH`: install Git, restart DSH, or set `gitExecutable` to the absolute path. `rewind_status` shows the detected executable/version. |
 | git errors such as `index.lock`, `Permission denied`, `Access is denied` | The workspace or data directory is locked/not writable for your user (antivirus, another process, admin-owned folder). Close the locking program, fix permissions, or point `dataDir` at a writable folder. |
 | Very slow first turn | The first snapshot writes the whole workspace (minus ignored paths). Exclude large build/dependency folders with `ignoreDirs`/`exclude`; the next snapshots are incremental. |
-| Disk keeps growing | Lower `autoMaintenance.thresholdBytes`, run `rewind_prune`, and confirm `node_modules`/build output are excluded. |
+| Disk keeps growing | The global `maxTotalBytes` budget (default 100 MiB) deletes the oldest snapshots automatically. Check `rewind_status` → `storage.overBudget`/`pausedWorkspaces`; exclude regenerated build caches (`.vs/`, PCH, `Intermediate/`) if you want more useful history, or raise the cap (`maxTotalBytes: 0` disables it). |
 | Button clicked but nothing changes | Check the DSH log for `dsh-all-rewind` messages; a git failure logs the command and its stderr. |
 
 ---

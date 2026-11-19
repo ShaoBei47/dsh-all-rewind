@@ -24,6 +24,10 @@
         # git 不在 PATH 时指定可执行文件（Windows 示例）
         # gitExecutable: "C:/Program Files/Git/cmd/git.exe"
         keepTurns: 20
+        # 整个影子存储的硬上限（所有工作区仓库合计，默认 100 MiB = 104857600）。
+        # 超出后按先进先出删除最老的快照；单个快照本身就超上限时连它一起删，
+        # 并暂停该工作区的快照（每 30 分钟重试一次）。
+        maxTotalBytes: 104857600
         conversation:
           enabled: true
         autoMaintenance:

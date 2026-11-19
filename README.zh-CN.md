@@ -33,11 +33,15 @@
   输入框，可直接修改重发。
 - **占用小**：每个工作区一个真正的 git 对象库，一轮一个 commit；只写入变化的内容，
   相似版本由 `git gc` 做 delta 压缩。
+- **容量硬上限**：整个影子存储（所有工作区仓库合计）有硬上限 `maxTotalBytes`，默认 **100 MiB**。
+  超出后按**先进先出**删除最老的快照，并把保留的锚点重写成新的历史，确保 `git gc` 真正释放空间。
+  如果单个快照本身就超过上限（例如工作区里有多 GB 的编译缓存），连它一起删，该工作区暂停快照，
+  至少 30 分钟后、且工作区缩小了 20% 或调大了 `maxTotalBytes` 才会重试一次；
+  `rewind_status` 会显示上限、当前占用和暂停的工作区。
 - **不碰你的仓库**：影子的 `GIT_DIR` 在插件数据目录里，工作区只是 `--work-tree`。
 - **遵守忽略规则**：工作区 `.gitignore` 以及默认的 `node_modules/`、`dist/`、`build/`、`.venv/`
   等重目录不会被快照。
 - **回退可撤销**：恢复文件前会先把当前状态做成安全快照，退过头也能找回来。
-- **容量可控**：每个会话只列出最近 `keepTurns` 个回退点；仓库超过阈值后自动 `git gc`。
 - **工作区不是 git 仓库也能用**：影子仓库由插件自己创建。
 - **同一工作区共用一个仓库**：多个会话切换不会重复占空间。
 
@@ -189,9 +193,20 @@ node install.mjs --uninstall   # 移除 profile 条目和复制过去的包
 
 ### 磁盘占用
 
-每轮一次 `git add` + 一个 commit：没变的内容指向同一个 object；仓库超过
-`autoMaintenance.thresholdBytes` 后自动 `git gc`，把相似版本打成增量。普通项目每轮只改几个文件，
-通常只占几 MB；由于排除了 `node_modules/`、`dist/` 等目录，第一个 commit 也很小。
+每轮一次 `git add` + 一个 commit：没变的内容指向同一个 object，所以只有真正变化的内容会占用新空间。
+但 git 历史本身只增不减，因此插件对**整个存储**做硬性预算：
+
+- `maxTotalBytes`（默认 **100 MiB**）是 `dataDir` 下所有工作区影子仓库**合计**的硬上限。
+- 超出上限时，按**先进先出**删除最老的快照（跨工作区统一排序）。保留的锚点会被重写成新的历史，
+  并清空 reflog，随后 `git gc --prune=now` 才会真正释放被删对象的空间。
+- 如果**单个快照**本身就超过整个上限（例如工作区里有 GB 级的 `.vs`、PCH 或构建产物），
+  这个快照也会被删掉：该工作区**不保留任何回退点**，并暂停快照；至少 30 分钟后、且工作区缩小
+  20% 或调大了 `maxTotalBytes` 才会重试一次，避免每轮反复写入再删除。
+  `rewind_status` 的 `storage.pausedWorkspaces` 和工作区条目里的 `paused` 会说明原因。
+- 每轮都重新生成的二进制大文件（VS 数据库、PCH、构建输出）是存储快速膨胀的常见原因；用
+  `.gitignore` / `ignoreDirs` / `exclude` 排除它们，预算才能留给有用的历史。
+- 如果想放宽或关闭预算，把 `maxTotalBytes` 调大或设为 `0`（设为 `0` 时只保留
+  `keepTurns` + `autoMaintenance` 的旧行为）。
 
 ---
 
@@ -208,6 +223,7 @@ node install.mjs --uninstall   # 移除 profile 条目和复制过去的包
         gitExecutable: git                # git 可执行文件（不在 PATH 时写绝对路径）
         gitTimeoutMs: 120000              # 单条 git 命令超时
         keepTurns: 20                     # 每个会话列出的回退点数量
+        maxTotalBytes: 104857600          # 整个存储的硬上限（100 MiB；0 = 不限制）
         conversation:
           enabled: true                   # 同时就地截断对话
         respectSandboxPolicy: true        # 只读会话拒绝文件回退
@@ -226,7 +242,8 @@ node install.mjs --uninstall   # 移除 profile 条目和复制过去的包
 | `dataDir` | `$DSH_HOME/dsh-all-rewind` | 影子仓库根目录；支持绝对路径、`~/...` 或相对 `$DSH_HOME`。 |
 | `gitExecutable` | `git` | 要执行的 git 命令。 |
 | `gitTimeoutMs` | `120000` | 单条 git 命令超时。 |
-| `keepTurns` | `20` | 超出窗口的旧锚点不再列出（git 对象仍然共享）。 |
+| `keepTurns` | `20` | 超出窗口的旧锚点不再列出（git 对象受全局预算约束）。 |
+| `maxTotalBytes` | `104857600`（100 MiB） | 所有影子仓库合计的硬上限；超出后按先进先出删最老快照；单个快照超上限时连它一起删并暂停该工作区；`0` 表示不限制。 |
 | `conversation.enabled` | `true` | 是否同时回退对话；`false` 表示只回退文件。 |
 | `respectSandboxPolicy` | `true` | 只读会话下拒绝文件回退（除非 force）。 |
 | `autoMaintenance.enabled` | `true` | 是否自动 `git gc`。 |
@@ -292,7 +309,7 @@ node install.mjs --uninstall   # 移除 profile 条目和复制过去的包
 | `GIT_UNAVAILABLE` / 完全看不到按钮 | DSH 进程的 PATH 里没有 `git`：安装 Git、重启 DSH，或在配置里设置 `gitExecutable` 绝对路径。`rewind_status` 会显示实际检测到的可执行文件和版本。 |
 | git 报 `index.lock`、`Permission denied`、`Access is denied` | 工作区或数据目录被占用/当前用户不可写（杀毒软件、其他进程、管理员拥有的目录）。关闭占用程序、修权限，或把 `dataDir` 指到可写目录。 |
 | 第一轮很慢 | 首次快照要写入整个工作区（排除项之外）。用 `ignoreDirs`/`exclude` 排除大的构建/依赖目录；之后的快照都是增量的。 |
-| 磁盘持续变大 | 调低 `autoMaintenance.thresholdBytes`，执行 `rewind_prune`，并确认 `node_modules`/构建产物已被排除。 |
+| 磁盘持续变大 | 全局预算 `maxTotalBytes`（默认 100 MiB）会自动按先进先出删除最老的快照。用 `rewind_status` 看 `storage.overBudget`/`pausedWorkspaces`；如果希望保留更多有用历史，排除每轮重建的构建缓存（`.vs/`、PCH、`Intermediate/`）或调大上限（`maxTotalBytes: 0` 关闭上限）。 |
 | 点了按钮没反应 | 查看 DSH 日志里的 `dsh-all-rewind` 记录；git 失败会带上命令和 stderr。 |
 
 ---

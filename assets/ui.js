@@ -149,7 +149,12 @@
     if (point.preview) parts.push('「' + point.preview + '」')
     parts.push('同时回退对话与工作区文件')
     if (state.storage && state.storage.dataDir) {
-      parts.push('快照仓库: ' + state.storage.dataDir + (state.storage.diskBytes ? '（' + formatBytes(state.storage.diskBytes) + '）' : ''))
+      var used = state.storage.diskBytes ? formatBytes(state.storage.diskBytes) : ''
+      var cap = state.storage.maxBytes ? ' / ' + formatBytes(state.storage.maxBytes) : ''
+      parts.push('快照仓库: ' + state.storage.dataDir + (used ? '（' + used + cap + '）' : ''))
+      if (state.storage.pausedWorkspaces && state.storage.pausedWorkspaces.length) {
+        parts.push('存储预算已满，已暂停这些工作区的快照: ' + state.storage.pausedWorkspaces.join(', '))
+      }
     }
     if (state.git && state.git.available) parts.push('git ' + (state.git.version || ''))
     return parts.join(' · ')
